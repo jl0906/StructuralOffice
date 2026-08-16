@@ -8,6 +8,7 @@ from datetime import date, datetime, time, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -496,6 +497,93 @@ class StructuralOfficeManager:
             )
         )
 
+    async def async_get_materialized_task(self, task_id: str) -> dict[str, Any]:
+        """Return one task with its checklist."""
+        return await self.hass.async_add_executor_job(
+            self.database.get_materialized_task, task_id
+        )
+
+    async def async_create_manual_task(
+        self, raw: dict[str, Any], user_id: str, user_name: str
+    ) -> dict[str, Any]:
+        """Create a standalone task for the Windows client."""
+        result = await self.hass.async_add_executor_job(
+            self.database.create_manual_task,
+            raw,
+            dt_util.utcnow().isoformat(),
+            user_id,
+            user_name,
+        )
+        self._fire_task_event(result["id"], "created", result["revision"])
+        return result
+
+    async def async_update_materialized_task(
+        self,
+        task_id: str,
+        changes: dict[str, Any],
+        expected_revision: int,
+        user_id: str,
+        user_name: str,
+    ) -> dict[str, Any]:
+        """Update one task and publish a live refresh event."""
+        result = await self.hass.async_add_executor_job(
+            self.database.update_materialized_task,
+            task_id,
+            changes,
+            expected_revision,
+            user_id,
+            user_name,
+        )
+        self._fire_task_event(task_id, "updated", result["revision"])
+        return result
+
+    async def async_update_task_checklist_item(
+        self,
+        task_id: str,
+        item_id: str,
+        changes: dict[str, Any],
+        expected_revision: int,
+        user_id: str,
+        user_name: str,
+    ) -> dict[str, Any]:
+        """Update one checklist item and publish a live refresh event."""
+        result = await self.hass.async_add_executor_job(
+            self.database.update_task_checklist_item,
+            task_id,
+            item_id,
+            changes,
+            expected_revision,
+            user_id,
+            user_name,
+        )
+        self._fire_task_event(task_id, "checklist_updated", result["revision"])
+        return result
+
+    @callback
+    def _fire_task_event(self, task_id: str, operation: str, revision: int) -> None:
+        self.hass.bus.async_fire(
+            LIVE_UPDATE_EVENT,
+            {
+                "collection": "tasks",
+                "operation": operation,
+                "record_id": task_id,
+                "revision": revision,
+            },
+        )
+        self._notify_changed()
+
+    async def async_list_import_batches(self, limit: int, offset: int) -> dict[str, Any]:
+        """Return retained invoice import history."""
+        return await self.hass.async_add_executor_job(
+            self.database.list_import_batches, limit, offset
+        )
+
+    async def async_get_import_batch(self, import_id: str) -> dict[str, Any]:
+        """Return one invoice import with row-level history."""
+        return await self.hass.async_add_executor_job(
+            self.database.get_import_batch, import_id
+        )
+
     async def async_list_accounting_batches(
         self, *, status: str | None, limit: int, offset: int
     ) -> dict[str, Any]:
@@ -767,14 +855,14 @@ class StructuralOfficeManager:
                 },
             )
             self._notify_changed()
-        if result["created"] and self.options[CONF_NOTIFY_TARGETS]:
+        if result["notifiable_created"] and self.options[CONF_NOTIFY_TARGETS]:
             await self.hass.services.async_call(
                 "notify",
                 "send_message",
                 {
                     "title": "StructuralOffice: Accounting tasks",
                     "message": (
-                        f"{result['created']} grouped task(s) were created for unpaid "
+                        f"{result['notifiable_created']} grouped task(s) were created for unpaid "
                         "invoices. Review them in the StructuralOffice Windows client."
                     ),
                     "data": {
@@ -797,6 +885,7 @@ class StructuralOfficeManager:
     async def async_restore_backup(self, filename: str) -> None:
         """Restore a managed backup and reload all in-memory records."""
         await self.hass.async_add_executor_job(self.database.restore_backup, filename)
+        await self.hass.async_add_executor_job(self.database.initialize)
         self.data = await self.hass.async_add_executor_job(
             self.database.load, set(self.data)
         )
@@ -814,7 +903,7 @@ class StructuralOfficeManager:
         return {
             "backups": list(self.backups),
             "database": dict(self.database_stats),
-            "version": "0.6.0-alpha",
+            "version": "0.7.0-alpha",
         }
 
     async def async_set_occurrence_status(self, item_id: str, status: str) -> dict[str, Any]:
@@ -940,8 +1029,9 @@ class StructuralOfficeManager:
             offsets = routine["reminder_offsets"]
             if not offsets:
                 continue
-            start = now.date() - timedelta(days=max(offsets) + 1)
-            end = now.date() - timedelta(days=min(offsets) - 1)
+            routine_now = now.astimezone(ZoneInfo(routine.get("timezone", "Europe/Berlin")))
+            start = routine_now.date() - timedelta(days=max(offsets) + 1)
+            end = routine_now.date() - timedelta(days=min(offsets) - 1)
             due_clock = time.fromisoformat(routine["due_time"])
             for due in iter_due_dates(routine, start, end):
                 for topic_id in routine["topic_ids"]:
@@ -954,24 +1044,49 @@ class StructuralOfficeManager:
                     topic = self.data["topics"].get(topic_id)
                     if topic is None:
                         continue
+                    eligible: list[tuple[int, datetime, str]] = []
                     for offset in offsets:
                         remind_date = due + timedelta(days=offset)
                         remind_at = datetime.combine(
                             remind_date,
                             due_clock,
-                            tzinfo=dt_util.DEFAULT_TIME_ZONE,
+                            tzinfo=ZoneInfo(routine.get("timezone", "Europe/Berlin")),
                         )
                         notification_id = f"{item_id}:{offset}"
-                        if notification_id in self.data["notifications"]:
-                            continue
-                        age = now - remind_at
-                        allowed_age = catch_up if catch_up > timedelta(0) else SCHEDULER_INTERVAL
-                        if remind_at <= now and age <= allowed_age:
-                            await self._async_send_notification(
-                                topic["name"], routine["name"], due, item_id
+                        delivered = notification_id in self.data["notifications"] or await (
+                            self.hass.async_add_executor_job(
+                                self.database.reminder_was_delivered, notification_id
                             )
-                            self.data["notifications"][notification_id] = now.isoformat()
-                            changed = True
+                        )
+                        if delivered:
+                            continue
+                        age = routine_now - remind_at
+                        policy = routine.get("catch_up_policy", "configured_window")
+                        allowed_age = (
+                            SCHEDULER_INTERVAL
+                            if policy == "skip_missed" or catch_up <= timedelta(0)
+                            else catch_up
+                        )
+                        if remind_at <= routine_now and age <= allowed_age:
+                            eligible.append((offset, remind_at, notification_id))
+                    if routine.get("catch_up_policy") == "latest_only" and eligible:
+                        eligible = [max(eligible, key=lambda item: item[1])]
+                    for offset, remind_at, notification_id in eligible:
+                        await self._async_send_notification(
+                            topic["name"], routine["name"], due, item_id
+                        )
+                        sent_at = now.isoformat()
+                        await self.hass.async_add_executor_job(
+                            self.database.record_reminder_delivery,
+                            notification_id,
+                            item_id,
+                            routine["id"],
+                            offset,
+                            remind_at.isoformat(),
+                            sent_at,
+                        )
+                        self.data["notifications"][notification_id] = sent_at
+                        changed = True
         if changed:
             await self._async_save()
 

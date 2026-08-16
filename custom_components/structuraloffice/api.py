@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 from io import BytesIO
+from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from aiohttp import web
@@ -348,6 +349,87 @@ class StructuralOfficeTasksView(HomeAssistantView):
         except StructuralOfficeValidationError as err:
             return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
 
+    async def post(self, request: web.Request) -> web.Response:
+        _role(request, write=True)
+        try:
+            user_id, user_name = _identity(request)
+            result = await _manager(request).async_create_manual_task(
+                await request.json(), user_id, user_name
+            )
+            return self.json(result, status_code=201)
+        except (StructuralOfficeValidationError, TypeError, ValueError) as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+
+class StructuralOfficeTaskView(HomeAssistantView):
+    """Read or update one persisted task."""
+
+    url = f"{API_PREFIX}/tasks/{{task_id}}"
+    name = f"api:{DOMAIN}:v1:task"
+
+    async def get(self, request: web.Request, task_id: str) -> web.Response:
+        _role(request)
+        try:
+            return self.json(await _manager(request).async_get_materialized_task(task_id))
+        except StructuralOfficeValidationError as err:
+            return self.json({"code": "not_found", "error": str(err)}, status_code=404)
+
+    async def patch(self, request: web.Request, task_id: str) -> web.Response:
+        _role(request, write=True)
+        try:
+            payload = await request.json()
+            if "expected_revision" not in payload:
+                raise StructuralOfficeValidationError("expected_revision is required")
+            user_id, user_name = _identity(request)
+            result = await _manager(request).async_update_materialized_task(
+                task_id,
+                payload.get("data", {}),
+                int(payload["expected_revision"]),
+                user_id,
+                user_name,
+            )
+            return self.json(result)
+        except StructuralOfficeConflictError as err:
+            return self.json(
+                {"code": "revision_conflict", "current": err.current, "error": str(err)},
+                status_code=409,
+            )
+        except (StructuralOfficeValidationError, TypeError, ValueError) as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+
+class StructuralOfficeTaskChecklistView(HomeAssistantView):
+    """Update one persisted task checklist item."""
+
+    url = f"{API_PREFIX}/tasks/{{task_id}}/checklist/{{item_id}}"
+    name = f"api:{DOMAIN}:v1:task-checklist"
+
+    async def patch(
+        self, request: web.Request, task_id: str, item_id: str
+    ) -> web.Response:
+        _role(request, write=True)
+        try:
+            payload = await request.json()
+            if "expected_revision" not in payload:
+                raise StructuralOfficeValidationError("expected_revision is required")
+            user_id, user_name = _identity(request)
+            result = await _manager(request).async_update_task_checklist_item(
+                task_id,
+                item_id,
+                payload.get("data", {}),
+                int(payload["expected_revision"]),
+                user_id,
+                user_name,
+            )
+            return self.json(result)
+        except StructuralOfficeConflictError as err:
+            return self.json(
+                {"code": "revision_conflict", "current": err.current, "error": str(err)},
+                status_code=409,
+            )
+        except (StructuralOfficeValidationError, TypeError, ValueError) as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
 
 class StructuralOfficeAccountingTasksView(HomeAssistantView):
     """Return grouped tasks created from unpaid invoices."""
@@ -377,12 +459,17 @@ class StructuralOfficeAccountingTaskInvoicesView(HomeAssistantView):
 
     async def get(self, request: web.Request, batch_id: str) -> web.Response:
         _role(request)
-        return self.json(
-            {
-                "batch_id": batch_id,
-                "invoices": await _manager(request).async_accounting_batch_invoices(batch_id),
-            }
-        )
+        try:
+            return self.json(
+                {
+                    "batch_id": batch_id,
+                    "invoices": await _manager(request).async_accounting_batch_invoices(
+                        batch_id
+                    ),
+                }
+            )
+        except StructuralOfficeValidationError as err:
+            return self.json({"code": "not_found", "error": str(err)}, status_code=404)
 
 
 class StructuralOfficeAccountingRulesView(HomeAssistantView):
@@ -445,6 +532,64 @@ class StructuralOfficeInvoiceImportView(HomeAssistantView):
             return self.json(result)
         except (binascii.Error, StructuralOfficeValidationError, ValueError) as err:
             return self.json({"error": str(err)}, status_code=400)
+
+
+class StructuralOfficeImportHistoryView(HomeAssistantView):
+    """Return retained invoice import history."""
+
+    url = f"{API_PREFIX}/imports"
+    name = f"api:{DOMAIN}:v1:imports"
+
+    async def get(self, request: web.Request) -> web.Response:
+        _role(request)
+        try:
+            return self.json(
+                await _manager(request).async_list_import_batches(
+                    _integer(request.query.get("limit"), 100, "limit"),
+                    _integer(request.query.get("offset"), 0, "offset"),
+                )
+            )
+        except StructuralOfficeValidationError as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+
+class StructuralOfficeImportView(HomeAssistantView):
+    """Return one invoice import and its row-level history."""
+
+    url = f"{API_PREFIX}/imports/{{import_id}}"
+    name = f"api:{DOMAIN}:v1:import"
+
+    async def get(self, request: web.Request, import_id: str) -> web.Response:
+        _role(request)
+        try:
+            return self.json(await _manager(request).async_get_import_batch(import_id))
+        except StructuralOfficeValidationError as err:
+            return self.json({"code": "not_found", "error": str(err)}, status_code=404)
+
+
+class StructuralOfficeImportSourceView(HomeAssistantView):
+    """Download a retained original invoice import source."""
+
+    url = f"{API_PREFIX}/imports/{{import_id}}/source"
+    name = f"api:{DOMAIN}:v1:import-source"
+
+    async def get(self, request: web.Request, import_id: str) -> web.Response:
+        _role(request, admin=True)
+        try:
+            filename, content = await _manager(request).hass.async_add_executor_job(
+                _manager(request).database.read_import_source, import_id
+            )
+            return web.Response(
+                body=content,
+                content_type="text/csv",
+                headers={
+                    "Content-Disposition": (
+                        f'attachment; filename="{_safe_filename(Path(filename).stem)}.csv"'
+                    )
+                },
+            )
+        except StructuralOfficeValidationError as err:
+            raise web.HTTPNotFound(text=str(err)) from err
 
 
 class StructuralOfficeDocumentsView(HomeAssistantView):
@@ -595,11 +740,16 @@ def async_register(hass: HomeAssistant) -> None:
         StructuralOfficeAuditView,
         StructuralOfficeRolesView,
         StructuralOfficeTasksView,
+        StructuralOfficeTaskView,
+        StructuralOfficeTaskChecklistView,
         StructuralOfficeAccountingTasksView,
         StructuralOfficeAccountingTaskInvoicesView,
         StructuralOfficeAccountingRulesView,
         StructuralOfficeAccountingRuleView,
         StructuralOfficeInvoiceImportView,
+        StructuralOfficeImportHistoryView,
+        StructuralOfficeImportView,
+        StructuralOfficeImportSourceView,
         StructuralOfficeDocumentsView,
         StructuralOfficeBackupsView,
         StructuralOfficeBackupView,

@@ -5,10 +5,10 @@ invoice due-date monitoring. The operational desktop interface is being moved to
 separate Windows application. Home Assistant now provides database health statistics
 and managed backup controls only.
 
-## Version 0.6.0-alpha
+## Version 0.7.0-alpha
 
-This release prepares the backend database and API for recurring operational work and
-grouped accounting follow-up tasks in the future Windows client:
+This release completes the main backend task lifecycle and stabilizes the contract needed
+to start the Windows-client beta work:
 
 - Dedicated, versioned SQLite database at
   `/config/structuraloffice/structuraloffice.db`
@@ -51,7 +51,17 @@ grouped accounting follow-up tasks in the future Windows client:
 - No-op handling when the exact same CSV source is applied again
 - Document generation from the exact invoice membership of a grouped accounting task,
   only after an explicit request
-- Database schema migration from versions 1 and 2 to version 3
+- Standalone task creation plus revision-protected task and checklist updates
+- Completion timestamps, completing-user attribution, and task/checklist notes
+- Advisory edit presence for tasks, checklist items, and accounting rules
+- Configurable non-working dates and per-routine IANA timezone validation
+- Effective `configured_window`, `latest_only`, and `skip_missed` reminder catch-up
+  strategies
+- Persistent reminder-delivery records that prevent duplicates after a restart
+- Paginated import history, row details, and administrator-only source downloads
+- Automatic safety backup before every database schema migration
+- Machine-readable OpenAPI 3.1 contract for the future Windows client
+- Database schema migration from versions 1, 2, and 3 to version 4
 
 StructuralOffice automatically creates tasks when receivables remain unpaid after their
 configured due dates. It never creates or sends payment-reminder or dunning documents
@@ -107,13 +117,16 @@ token in the `Authorization` header. Authorization is additionally limited by th
 StructuralOffice administrator, editor, and viewer roles.
 
 The complete request, revision, presence, conflict, and reconnect contract is documented
-in [API.md](API.md).
+in [API.md](API.md) and [OPENAPI.yaml](OPENAPI.yaml).
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/structuraloffice/v1/status` | Backend and database status |
 | `GET` | `/api/structuraloffice/v1/invoices` | Normalized invoices; supports `status` and `due_state` filters |
 | `GET` | `/api/structuraloffice/v1/tasks` | Materialized recurring and accounting tasks |
+| `POST` | `/api/structuraloffice/v1/tasks` | Create a standalone task |
+| `GET/PATCH` | `/api/structuraloffice/v1/tasks/{id}` | Read or revision-protected update of a task |
+| `PATCH` | `/api/structuraloffice/v1/tasks/{id}/checklist/{item_id}` | Revision-protected checklist update |
 | `GET` | `/api/structuraloffice/v1/accounting/tasks` | Grouped accounting follow-up tasks |
 | `GET` | `/api/structuraloffice/v1/accounting/tasks/{id}/invoices` | Exact invoice membership of one grouped task |
 | `GET` | `/api/structuraloffice/v1/accounting/rules` | Configurable follow-up task rules |
@@ -125,6 +138,9 @@ in [API.md](API.md).
 | `GET` | `/api/structuraloffice/v1/audit` | Administrator-only audit metadata |
 | `GET/PUT` | `/api/structuraloffice/v1/roles` | Administrator-only role management |
 | `POST` | `/api/structuraloffice/v1/imports/invoice-list` | Preview or apply a base64-encoded CSV import |
+| `GET` | `/api/structuraloffice/v1/imports` | Paginated import history |
+| `GET` | `/api/structuraloffice/v1/imports/{id}` | Import metadata and retained row fingerprints |
+| `GET` | `/api/structuraloffice/v1/imports/{id}/source` | Administrator-only original source download |
 | `POST` | `/api/structuraloffice/v1/documents` | Explicitly generate one PDF or a ZIP batch |
 | `GET/POST` | `/api/structuraloffice/v1/backups` | List or create backups |
 | `GET/POST/DELETE` | `/api/structuraloffice/v1/backups/{filename}` | Download, restore, or delete a backup |
@@ -146,6 +162,11 @@ up to 100 ordered structured steps. Routines assign one or more topics to daily,
 monthly, yearly, or explicit-date schedules. They also store due time, timezone, start
 and end dates, reminder offsets, catch-up policy, invalid-month-day behavior, and an
 optional business-day adjustment.
+
+`non_working_dates` adds company holidays or other exceptional closure dates to the
+business-day calculation. Reminder catch-up can use the globally configured window,
+send only the latest missed reminder, or skip reminders missed outside the scheduler
+interval. Successful deliveries are committed to SQLite for restart-safe deduplication.
 
 The server materializes concrete routine tasks from these definitions. Topic and step
 content is snapshotted into each task so historical tasks remain understandable after a
@@ -180,7 +201,8 @@ integrity mechanism.
 ## Backup and privacy
 
 Backups are stored in `/config/structuraloffice/backups`. Restore creates an additional
-safety backup before replacing the live database and rejects a source database that
+safety backup before replacing the live database, and every schema migration creates a
+backup before modifying the existing database. Restore rejects a source database that
 fails SQLite's integrity check. StructuralOffice does not transmit business data to a
 dedicated cloud service. Home Assistant access controls still apply to every API and
 panel request.

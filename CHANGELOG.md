@@ -5,6 +5,40 @@ All notable changes to StructuralOffice are documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.7.0-alpha] - 2026-08-16
+
+### Added
+
+- Database schema version 4 with persistent reminder deliveries and configurable
+  non-working dates for recurrence rules.
+- Standalone task creation and detailed task retrieval with checklist snapshots.
+- Revision-protected updates for task status, priority, due time, completion note, and
+  individual checklist items.
+- Task start/completion timestamps, completing-user attribution, checklist notes, and
+  audit/change events.
+- Edit-presence support for tasks, checklist items, and accounting rules.
+- Effective reminder catch-up policies: configured window, latest eligible reminder, or
+  skip missed reminders.
+- Per-routine IANA timezone validation and scheduling.
+- Paginated import history, row-level fingerprint details, and administrator-only source
+  downloads.
+- Automatic safety backup before an existing database schema is migrated.
+- OpenAPI 3.1 specification covering the Windows-client REST surface.
+- Tests for migration backup, standalone tasks, optimistic task/checklist conflicts,
+  non-working dates, import history, and restart-safe reminder delivery.
+
+### Changed
+
+- Manual task state changes are synchronized with their grouped accounting batch.
+- Manually progressed or completed accounting tasks are no longer reopened by a routine
+  refresh while their membership is unchanged.
+- The frontend cache and integration version are now `0.7.0-alpha`.
+
+### Security
+
+- Original invoice-import sources require the StructuralOffice administrator role.
+- Task and checklist writes require editor access and an expected revision.
+
 ## [0.6.0-alpha] - 2026-08-16
 
 ### Added
@@ -189,7 +223,8 @@ All notable changes to StructuralOffice are documented in this file. The format 
 - Push notifications to selected `notify` entities
 - Task states, sensors, calendar support, and local storage
 
-[Unreleased]: https://github.com/jl0906/StructuralOffice/compare/v0.6.0-alpha...HEAD
+[Unreleased]: https://github.com/jl0906/StructuralOffice/compare/v0.7.0-alpha...HEAD
+[0.7.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.6.0-alpha...v0.7.0-alpha
 [0.6.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.5.0-alpha...v0.6.0-alpha
 [0.5.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.4.0-alpha...v0.5.0-alpha
 [0.4.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.3.0-alpha...v0.4.0-alpha

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .const import DATABASE_SCHEMA_VERSION
+from .const import DATABASE_SCHEMA_VERSION, VALID_STATUSES
 from .models import StructuralOfficeValidationError
 
 _BACKUP_NAME = re.compile(r"^structuraloffice-\d{8}T\d{12}Z\.db$")
@@ -22,6 +22,7 @@ VALID_COLLECTIONS = {
     "routines",
     "topics",
 }
+VALID_EDIT_COLLECTIONS = VALID_COLLECTIONS | {"accounting_rules", "task_checklist", "tasks"}
 
 
 class StructuralOfficeConflictError(StructuralOfficeValidationError):
@@ -43,6 +44,9 @@ class StructuralOfficeDatabase:
         """Create the database and apply schema migrations."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.backup_directory.mkdir(parents=True, exist_ok=True)
+        previous_version = self._existing_schema_version()
+        if previous_version is not None and previous_version < DATABASE_SCHEMA_VERSION:
+            self.create_backup()
         with self._connect() as connection:
             connection.executescript(
                 """
@@ -67,6 +71,7 @@ class StructuralOfficeDatabase:
                     record_count INTEGER NOT NULL,
                     created_count INTEGER NOT NULL,
                     updated_count INTEGER NOT NULL,
+                    unchanged_count INTEGER NOT NULL DEFAULT 0,
                     cancelled_count INTEGER NOT NULL,
                     raw_payload BLOB
                 );
@@ -99,6 +104,11 @@ class StructuralOfficeDatabase:
             if "new_row_count" not in import_columns:
                 connection.execute(
                     "ALTER TABLE import_batches ADD COLUMN new_row_count "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+            if "unchanged_count" not in import_columns:
+                connection.execute(
+                    "ALTER TABLE import_batches ADD COLUMN unchanged_count "
                     "INTEGER NOT NULL DEFAULT 0"
                 )
             connection.executescript(
@@ -192,7 +202,8 @@ class StructuralOfficeDatabase:
                     months TEXT NOT NULL,
                     explicit_dates TEXT NOT NULL,
                     business_day_rule TEXT NOT NULL,
-                    invalid_day_rule TEXT NOT NULL
+                    invalid_day_rule TEXT NOT NULL,
+                    non_working_dates TEXT NOT NULL DEFAULT '[]'
                 );
                 CREATE TABLE IF NOT EXISTS workflow_routine_topics (
                     routine_id TEXT NOT NULL REFERENCES workflow_routines(id) ON DELETE CASCADE,
@@ -245,6 +256,19 @@ class StructuralOfficeDatabase:
                     completed_by TEXT,
                     note TEXT NOT NULL DEFAULT '',
                     revision INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE TABLE IF NOT EXISTS reminder_deliveries (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL REFERENCES task_occurrences(id) ON DELETE CASCADE,
+                    routine_id TEXT NOT NULL,
+                    offset_days INTEGER NOT NULL,
+                    scheduled_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    sent_at TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(task_id, offset_days)
                 );
                 CREATE TABLE IF NOT EXISTS accounting_invoices (
                     id TEXT PRIMARY KEY,
@@ -324,12 +348,41 @@ class StructuralOfficeDatabase:
                 );
                 """
             )
+            recurrence_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(workflow_recurrence_rules)"
+                )
+            }
+            if "non_working_dates" not in recurrence_columns:
+                connection.execute(
+                    "ALTER TABLE workflow_recurrence_rules ADD COLUMN "
+                    "non_working_dates TEXT NOT NULL DEFAULT '[]'"
+                )
             self._insert_default_escalation_rules(connection, now)
             self._sync_all_projections(connection)
             connection.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
                 (str(DATABASE_SCHEMA_VERSION),),
             )
+
+    def _existing_schema_version(self) -> int | None:
+        """Return the schema version before initialization, if a database exists."""
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            return None
+        try:
+            with sqlite3.connect(self.path) as connection:
+                has_metadata = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'metadata'"
+                ).fetchone()
+                if not has_metadata:
+                    return 0
+                row = connection.execute(
+                    "SELECT value FROM metadata WHERE key = 'schema_version'"
+                ).fetchone()
+                return int(row[0]) if row else 0
+        except (sqlite3.DatabaseError, TypeError, ValueError):
+            return 0
 
     def _connect(self, path: Path | None = None) -> sqlite3.Connection:
         connection = sqlite3.connect(path or self.path, timeout=30)
@@ -358,7 +411,7 @@ class StructuralOfficeDatabase:
         )
 
     def _sync_all_projections(self, connection: sqlite3.Connection) -> None:
-        """Populate normalized schema-v3 tables from existing alpha records."""
+        """Populate normalized workflow tables from existing alpha records."""
         rows = connection.execute(
             "SELECT collection, record_id, payload, revision, updated_at, "
             "created_at, archived_at FROM records "
@@ -463,8 +516,8 @@ class StructuralOfficeDatabase:
             connection.execute(
                 "INSERT OR REPLACE INTO workflow_recurrence_rules("
                 "routine_id, frequency, interval_value, weekdays, month_days, months, "
-                "explicit_dates, business_day_rule, invalid_day_rule) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "explicit_dates, business_day_rule, invalid_day_rule, non_working_dates) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record_id,
                     schedule.get("frequency", "monthly"),
@@ -475,6 +528,7 @@ class StructuralOfficeDatabase:
                     json.dumps(schedule.get("dates", [])),
                     schedule.get("business_day_rule", "none"),
                     schedule.get("invalid_day_rule", "skip"),
+                    json.dumps(schedule.get("non_working_dates", [])),
                 ),
             )
             connection.execute(
@@ -950,7 +1004,8 @@ class StructuralOfficeDatabase:
         session_id: str | None = None,
     ) -> dict[str, Any]:
         """Create or refresh a soft edit-presence session."""
-        self._validate_collection(collection)
+        if collection not in VALID_EDIT_COLLECTIONS:
+            raise StructuralOfficeValidationError("Unknown edit collection")
         ttl_seconds = max(15, min(300, ttl_seconds))
         now = datetime.now(UTC)
         expires_at = now + timedelta(seconds=ttl_seconds)
@@ -1038,9 +1093,9 @@ class StructuralOfficeDatabase:
             connection.execute(
                 """INSERT INTO import_batches(
                     import_id, source_name, checksum, imported_at, record_count,
-                    created_count, updated_count, cancelled_count, raw_payload,
+                    created_count, updated_count, unchanged_count, cancelled_count, raw_payload,
                     known_row_count, new_row_count
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     batch["import_id"],
                     batch["source_name"],
@@ -1049,6 +1104,7 @@ class StructuralOfficeDatabase:
                     batch["record_count"],
                     batch["created"],
                     batch["updated"],
+                    batch.get("unchanged", 0),
                     batch["cancelled"],
                     raw_payload,
                     batch.get("known_rows", 0),
@@ -1121,6 +1177,76 @@ class StructuralOfficeDatabase:
                 ),
             )
             return connection.total_changes - before
+
+    def list_import_batches(self, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        """Return paginated invoice import history without source payloads."""
+        limit = max(1, min(500, limit))
+        offset = max(0, offset)
+        with self._connect() as connection:
+            total = connection.execute("SELECT COUNT(*) FROM import_batches").fetchone()[0]
+            rows = connection.execute(
+                "SELECT import_id, source_name, checksum, imported_at, record_count, "
+                "created_count, updated_count, unchanged_count, cancelled_count, "
+                "known_row_count, new_row_count, length(raw_payload) "
+                "FROM import_batches ORDER BY imported_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        keys = (
+            "import_id", "source_name", "checksum", "imported_at", "record_count",
+            "created", "updated", "unchanged", "cancelled", "known_rows", "new_rows",
+            "source_bytes",
+        )
+        return {
+            "items": [dict(zip(keys, row, strict=True)) for row in rows],
+            "limit": limit,
+            "offset": offset,
+            "total": total,
+        }
+
+    def get_import_batch(self, import_id: str) -> dict[str, Any]:
+        """Return one import and its retained row fingerprints."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT import_id, source_name, checksum, imported_at, record_count, "
+                "created_count, updated_count, unchanged_count, cancelled_count, "
+                "known_row_count, new_row_count, length(raw_payload) "
+                "FROM import_batches WHERE import_id = ?",
+                (import_id,),
+            ).fetchone()
+            if row is None:
+                raise StructuralOfficeValidationError("Import batch was not found")
+            keys = (
+                "import_id", "source_name", "checksum", "imported_at", "record_count",
+                "created", "updated", "unchanged", "cancelled", "known_rows",
+                "new_rows", "source_bytes",
+            )
+            batch = dict(zip(keys, row, strict=True))
+            rows = connection.execute(
+                "SELECT row_fingerprint, invoice_number, row_number, imported_at "
+                "FROM invoice_import_rows WHERE import_id = ? ORDER BY row_number",
+                (import_id,),
+            ).fetchall()
+        batch["rows"] = [
+            {
+                "fingerprint": row[0],
+                "invoice_number": row[1],
+                "row_number": row[2],
+                "imported_at": row[3],
+            }
+            for row in rows
+        ]
+        return batch
+
+    def read_import_source(self, import_id: str) -> tuple[str, bytes]:
+        """Return the retained original source for an administrator."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT source_name, raw_payload FROM import_batches WHERE import_id = ?",
+                (import_id,),
+            ).fetchone()
+        if row is None or row[1] is None:
+            raise StructuralOfficeValidationError("Import source was not found")
+        return row[0], bytes(row[1])
 
     def materialize_task_occurrences(
         self, occurrences: list[dict[str, Any]], timestamp: str
@@ -1213,12 +1339,13 @@ class StructuralOfficeDatabase:
         created = 0
         updated = 0
         completed = 0
+        notifiable_created = 0
         touched: list[str] = []
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rules = connection.execute(
                 "SELECT id, task_type, escalation_level, days_after_due, evaluation_time, "
-                "minimum_open_invoices, auto_complete_empty_batches "
+                "minimum_open_invoices, auto_complete_empty_batches, notify_enabled "
                 "FROM accounting_escalation_rules WHERE enabled = 1"
             ).fetchall()
             processed_rule_ids: set[str] = set()
@@ -1248,7 +1375,7 @@ class StructuralOfficeDatabase:
                         continue
                     dedupe = f"{rule[1]}:{rule[2]}:{due_date}:{currency}"
                     batch = connection.execute(
-                        "SELECT id, invoice_count_initial, revision FROM "
+                        "SELECT id, invoice_count_initial, revision, status FROM "
                         "accounting_task_batches WHERE deduplication_key = ?",
                         (dedupe,),
                     ).fetchone()
@@ -1279,15 +1406,14 @@ class StructuralOfficeDatabase:
                             ),
                         )
                         created += 1
+                        notifiable_created += int(bool(rule[7]))
                     else:
                         batch_id = batch[0]
                         connection.execute(
                             "UPDATE accounting_task_batches SET evaluation_date = ?, "
-                            "due_at = ?, status = 'open', completed_at = NULL, "
                             "updated_at = ?, revision = revision + 1 WHERE id = ?",
                             (
                                 evaluation_date,
-                                f"{evaluation_date}T{rule[4]}:00",
                                 timestamp,
                                 batch_id,
                             ),
@@ -1336,7 +1462,8 @@ class StructuralOfficeDatabase:
                 )
 
             open_batches = connection.execute(
-                "SELECT id, rule_id FROM accounting_task_batches WHERE status = 'open'"
+                "SELECT id, rule_id FROM accounting_task_batches "
+                "WHERE status IN ('open', 'in_progress')"
             ).fetchall()
             for batch_id, rule_id in open_batches:
                 if batch_id in touched or rule_id not in processed_rule_ids:
@@ -1357,6 +1484,7 @@ class StructuralOfficeDatabase:
             "completed": completed,
             "created": created,
             "evaluation_date": evaluation_date,
+            "notifiable_created": notifiable_created,
             "updated": updated,
         }
 
@@ -1395,7 +1523,16 @@ class StructuralOfficeDatabase:
         open_members = [item for item in members if item[1] == "open" and item[2] > 0]
         count = len(open_members)
         outstanding = sum(item[2] for item in open_members)
-        completed = auto_complete and count == 0
+        previous_status = connection.execute(
+            "SELECT status FROM accounting_task_batches WHERE id = ?", (batch_id,)
+        ).fetchone()[0]
+        completed = auto_complete and count == 0 and previous_status != "auto_completed"
+        if auto_complete and count == 0:
+            status = "auto_completed"
+        elif previous_status == "auto_completed":
+            status = "open"
+        else:
+            status = previous_status
         connection.execute(
             "UPDATE accounting_task_batches SET invoice_count_open = ?, "
             "outstanding_cents = ?, status = ?, completed_at = ?, updated_at = ? "
@@ -1403,8 +1540,8 @@ class StructuralOfficeDatabase:
             (
                 count,
                 outstanding,
-                "auto_completed" if completed else "open",
-                timestamp if completed else None,
+                status,
+                timestamp if status in {"auto_completed", "completed"} else None,
                 timestamp,
                 batch_id,
             ),
@@ -1485,6 +1622,10 @@ class StructuralOfficeDatabase:
     def accounting_task_invoice_ids(self, batch_id: str) -> list[dict[str, Any]]:
         """Return exact invoice membership for one grouped accounting task."""
         with self._connect() as connection:
+            if connection.execute(
+                "SELECT 1 FROM accounting_task_batches WHERE id = ?", (batch_id,)
+            ).fetchone() is None:
+                raise StructuralOfficeValidationError("Accounting task was not found")
             rows = connection.execute(
                 "SELECT invoice_id, outstanding_cents_at_creation, "
                 "outstanding_cents_current, status, included_at, resolved_at, "
@@ -1507,6 +1648,10 @@ class StructuralOfficeDatabase:
         offset: int = 0,
     ) -> dict[str, Any]:
         """Return persisted routine and accounting tasks."""
+        if status and status not in VALID_STATUSES:
+            raise StructuralOfficeValidationError("Invalid task status")
+        if source_type and source_type not in {"accounting_due_batch", "manual", "routine"}:
+            raise StructuralOfficeValidationError("Invalid task source type")
         limit = max(1, min(500, limit))
         offset = max(0, offset)
         clauses = ["archived_at IS NULL"]
@@ -1541,6 +1686,282 @@ class StructuralOfficeDatabase:
             item["snapshot"] = json.loads(item["snapshot"])
         return {"items": items, "limit": limit, "offset": offset, "total": total}
 
+    def get_materialized_task(self, task_id: str) -> dict[str, Any]:
+        """Return one materialized task and its checklist."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id, routine_id, topic_id, source_type, source_id, scheduled_date, "
+                "due_at, status, priority, topic_snapshot, started_at, completed_at, "
+                "completed_by, completion_note, revision, created_at, updated_at, archived_at "
+                "FROM task_occurrences WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise StructuralOfficeValidationError("Task was not found")
+            keys = (
+                "id", "routine_id", "topic_id", "source_type", "source_id",
+                "scheduled_date", "due_at", "status", "priority", "snapshot",
+                "started_at", "completed_at", "completed_by", "completion_note",
+                "revision", "created_at", "updated_at", "archived_at",
+            )
+            task = dict(zip(keys, row, strict=True))
+            task["snapshot"] = json.loads(task["snapshot"])
+            checklist_rows = connection.execute(
+                "SELECT id, source_step_id, position, title_snapshot, required, completed, "
+                "completed_at, completed_by, note, revision FROM task_checklist_items "
+                "WHERE task_id = ? ORDER BY position, id",
+                (task_id,),
+            ).fetchall()
+        checklist_keys = (
+            "id", "source_step_id", "position", "title", "required", "completed",
+            "completed_at", "completed_by", "note", "revision",
+        )
+        task["checklist"] = [
+            dict(zip(checklist_keys, item, strict=True)) for item in checklist_rows
+        ]
+        for item in task["checklist"]:
+            item["completed"] = bool(item["completed"])
+            item["required"] = bool(item["required"])
+        return task
+
+    def create_manual_task(
+        self, raw: dict[str, Any], timestamp: str, user_id: str, user_name: str
+    ) -> dict[str, Any]:
+        """Create one standalone task for an authorized client."""
+        title = str(raw.get("title") or "").strip()
+        if not title:
+            raise StructuralOfficeValidationError("Task title is required")
+        due_at = str(raw.get("due_at") or "").strip()
+        try:
+            scheduled_date = datetime.fromisoformat(due_at).date().isoformat()
+        except ValueError as err:
+            raise StructuralOfficeValidationError("Task due_at must be ISO 8601") from err
+        priority = str(raw.get("priority", "normal"))
+        if priority not in {"low", "normal", "high", "critical"}:
+            raise StructuralOfficeValidationError("Invalid task priority")
+        checklist = raw.get("checklist", [])
+        if not isinstance(checklist, list) or len(checklist) > 100:
+            raise StructuralOfficeValidationError("Task checklist is invalid")
+        task_id = str(raw.get("id") or uuid4().hex)
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id) is None:
+            raise StructuralOfficeValidationError("Task ID contains unsupported characters")
+        snapshot = json.dumps(
+            {
+                "category": str(raw.get("category") or ""),
+                "description": str(raw.get("description") or ""),
+                "topic_name": title,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    "INSERT INTO task_occurrences(id, source_type, scheduled_date, due_at, "
+                    "status, priority, topic_snapshot, created_at, updated_at) "
+                    "VALUES(?, 'manual', ?, ?, 'open', ?, ?, ?, ?)",
+                    (task_id, scheduled_date, due_at, priority, snapshot, timestamp, timestamp),
+                )
+            except sqlite3.IntegrityError as err:
+                raise StructuralOfficeValidationError("Task ID already exists") from err
+            for position, raw_item in enumerate(checklist):
+                item = raw_item if isinstance(raw_item, dict) else {"title": raw_item}
+                item_title = str(item.get("title") or "").strip()
+                if not item_title:
+                    raise StructuralOfficeValidationError("Checklist title is required")
+                connection.execute(
+                    "INSERT INTO task_checklist_items(id, task_id, position, title_snapshot, "
+                    "required) VALUES(?, ?, ?, ?, ?)",
+                    (
+                        f"{task_id}:{position}", task_id, position, item_title,
+                        int(bool(item.get("required", True))),
+                    ),
+                )
+            self._record_change(
+                connection, "tasks", task_id, "created", 1, user_id, user_name,
+                ["checklist", "due_at", "priority", "title"], raw, timestamp,
+            )
+        return self.get_materialized_task(task_id)
+
+    def update_materialized_task(
+        self,
+        task_id: str,
+        changes: dict[str, Any],
+        expected_revision: int,
+        user_id: str,
+        user_name: str,
+    ) -> dict[str, Any]:
+        """Update task state and scheduling with optimistic concurrency control."""
+        allowed = {"completion_note", "due_at", "priority", "status"}
+        if not changes or (unknown := set(changes) - allowed):
+            detail = f": {', '.join(sorted(unknown))}" if changes and unknown else ""
+            raise StructuralOfficeValidationError(f"Unsupported or empty task update{detail}")
+        normalized = dict(changes)
+        if "status" in normalized:
+            normalized["status"] = str(normalized["status"])
+            if normalized["status"] not in VALID_STATUSES - {"auto_completed"}:
+                raise StructuralOfficeValidationError("Invalid task status")
+        if "priority" in normalized:
+            normalized["priority"] = str(normalized["priority"])
+            if normalized["priority"] not in {"low", "normal", "high", "critical"}:
+                raise StructuralOfficeValidationError("Invalid task priority")
+        if "completion_note" in normalized:
+            normalized["completion_note"] = str(normalized["completion_note"])[:5000]
+        if "due_at" in normalized:
+            try:
+                datetime.fromisoformat(str(normalized["due_at"]))
+            except ValueError as err:
+                raise StructuralOfficeValidationError("Task due_at must be ISO 8601") from err
+            normalized["due_at"] = str(normalized["due_at"])
+        timestamp = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT revision, source_type, source_id, status, started_at, "
+                "completed_at, completed_by "
+                "FROM task_occurrences WHERE id = ? AND archived_at IS NULL",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise StructuralOfficeValidationError("Task was not found")
+            if row[0] != expected_revision:
+                raise StructuralOfficeConflictError(self.get_materialized_task(task_id))
+            status = normalized.get("status", row[3])
+            started_at = row[4] or (timestamp if status == "in_progress" else None)
+            terminal = status in {"completed", "skipped", "cancelled", "auto_completed"}
+            completed_at = (row[5] or timestamp) if terminal else None
+            completed_by = (row[6] or user_id) if terminal else None
+            assignments = [f"{key} = ?" for key in normalized]
+            values = list(normalized.values())
+            if "due_at" in normalized:
+                assignments.append("scheduled_date = ?")
+                values.append(datetime.fromisoformat(normalized["due_at"]).date().isoformat())
+            assignments.extend(
+                [
+                    "started_at = ?",
+                    "completed_at = ?",
+                    "completed_by = ?",
+                    "updated_at = ?",
+                    "revision = revision + 1",
+                ]
+            )
+            values.extend(
+                [
+                    started_at,
+                    completed_at,
+                    completed_by,
+                    timestamp,
+                    task_id,
+                ]
+            )
+            connection.execute(
+                f"UPDATE task_occurrences SET {', '.join(assignments)} WHERE id = ?", values
+            )
+            if row[1] == "accounting_due_batch" and row[2]:
+                batch_updates: dict[str, Any] = {}
+                if "status" in normalized:
+                    batch_updates["status"] = status
+                    batch_updates["completed_at"] = completed_at
+                if "due_at" in normalized:
+                    batch_updates["due_at"] = normalized["due_at"]
+                if batch_updates:
+                    batch_assignments = ", ".join(f"{key} = ?" for key in batch_updates)
+                    connection.execute(
+                        f"UPDATE accounting_task_batches SET {batch_assignments}, "
+                        "updated_at = ?, revision = revision + 1 WHERE id = ?",
+                        (*batch_updates.values(), timestamp, row[2]),
+                    )
+            current = connection.execute(
+                "SELECT revision FROM task_occurrences WHERE id = ?", (task_id,)
+            ).fetchone()[0]
+            self._record_change(
+                connection, "tasks", task_id, "updated", current, user_id, user_name,
+                sorted(normalized), normalized, timestamp,
+            )
+        return self.get_materialized_task(task_id)
+
+    def update_task_checklist_item(
+        self,
+        task_id: str,
+        item_id: str,
+        changes: dict[str, Any],
+        expected_revision: int,
+        user_id: str,
+        user_name: str,
+    ) -> dict[str, Any]:
+        """Update one task checklist item with optimistic concurrency control."""
+        allowed = {"completed", "note"}
+        if not changes or set(changes) - allowed:
+            raise StructuralOfficeValidationError("Unsupported or empty checklist update")
+        timestamp = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT revision FROM task_checklist_items WHERE id = ? AND task_id = ?",
+                (item_id, task_id),
+            ).fetchone()
+            if row is None:
+                raise StructuralOfficeValidationError("Checklist item was not found")
+            if row[0] != expected_revision:
+                current = next(
+                    item
+                    for item in self.get_materialized_task(task_id)["checklist"]
+                    if item["id"] == item_id
+                )
+                raise StructuralOfficeConflictError(current)
+            completed = int(bool(changes.get("completed", False)))
+            note = str(changes.get("note", ""))[:5000]
+            connection.execute(
+                "UPDATE task_checklist_items SET completed = ?, completed_at = ?, "
+                "completed_by = ?, note = ?, revision = revision + 1 WHERE id = ?",
+                (
+                    completed, timestamp if completed else None,
+                    user_id if completed else None, note, item_id,
+                ),
+            )
+            revision = row[0] + 1
+            self._record_change(
+                connection, "task_checklist", item_id, "updated", revision,
+                user_id, user_name, sorted(changes), changes, timestamp,
+            )
+        return next(
+            item
+            for item in self.get_materialized_task(task_id)["checklist"]
+            if item["id"] == item_id
+        )
+
+    def reminder_was_delivered(self, delivery_id: str) -> bool:
+        """Return whether a reminder delivery was committed successfully."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM reminder_deliveries WHERE id = ?", (delivery_id,)
+            ).fetchone()
+        return row is not None and row[0] == "sent"
+
+    def record_reminder_delivery(
+        self,
+        delivery_id: str,
+        task_id: str,
+        routine_id: str,
+        offset_days: int,
+        scheduled_at: str,
+        sent_at: str,
+    ) -> None:
+        """Persist a successful notification delivery for restart-safe deduplication."""
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO reminder_deliveries(id, task_id, routine_id, offset_days, "
+                "scheduled_at, status, sent_at, created_at, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, 'sent', ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET status='sent', sent_at=excluded.sent_at, "
+                "error=NULL, updated_at=excluded.updated_at",
+                (
+                    delivery_id, task_id, routine_id, offset_days, scheduled_at,
+                    sent_at, sent_at, sent_at,
+                ),
+            )
+
     def list_accounting_rules(self) -> list[dict[str, Any]]:
         """Return accounting task-generation rules."""
         with self._connect() as connection:
@@ -1573,10 +1994,11 @@ class StructuralOfficeDatabase:
             "days_after_due",
             "enabled",
             "evaluation_time",
-            "maximum_invoices_per_batch",
             "minimum_open_invoices",
             "notify_enabled",
         }
+        if not changes:
+            raise StructuralOfficeValidationError("Accounting rule update must not be empty")
         if unknown := set(changes) - allowed:
             raise StructuralOfficeValidationError(
                 f"Unsupported accounting rule fields: {', '.join(sorted(unknown))}"
@@ -1596,22 +2018,24 @@ class StructuralOfficeDatabase:
                 raise StructuralOfficeConflictError(current)
             normalized: dict[str, Any] = {}
             for key, value in changes.items():
-                if key in {"days_after_due", "maximum_invoices_per_batch", "minimum_open_invoices"}:
+                if key in {"days_after_due", "minimum_open_invoices"}:
                     normalized[key] = int(value)
                 elif key in {"enabled", "notify_enabled", "auto_complete_empty_batches"}:
-                    normalized[key] = int(bool(value))
+                    if not isinstance(value, bool):
+                        raise StructuralOfficeValidationError(f"{key} must be a boolean")
+                    normalized[key] = int(value)
                 else:
-                    if not re.fullmatch(r"[0-2]\d:[0-5]\d", str(value)):
-                        raise StructuralOfficeValidationError("Evaluation time must use HH:MM")
+                    try:
+                        datetime.strptime(str(value), "%H:%M")
+                    except ValueError as err:
+                        raise StructuralOfficeValidationError(
+                            "Evaluation time must use HH:MM"
+                        ) from err
                     normalized[key] = str(value)
             if normalized.get("days_after_due", 0) < 0:
                 raise StructuralOfficeValidationError("Days after due must not be negative")
             if normalized.get("minimum_open_invoices", 1) < 1:
                 raise StructuralOfficeValidationError("Minimum open invoices must be positive")
-            if normalized.get("maximum_invoices_per_batch", 1) < 1:
-                raise StructuralOfficeValidationError(
-                    "Maximum invoices per batch must be positive"
-                )
             timestamp = datetime.now(UTC).isoformat()
             assignments = ", ".join(f"{key} = ?" for key in normalized)
             if assignments:

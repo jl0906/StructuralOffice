@@ -1,7 +1,8 @@
 # StructuralOffice API
 
 This document describes the alpha API contract implemented by StructuralOffice
-`0.6.0-alpha`. The contract may change before `1.0.0`.
+`0.7.0-alpha`. The contract may change before `1.0.0`. A machine-readable contract is
+available in [OPENAPI.yaml](OPENAPI.yaml).
 
 ## Connection and authorization
 
@@ -114,6 +115,8 @@ DELETE /api/structuraloffice/v1/editing/invoices/csv_123?session_id=<session-id>
 ```
 
 Sessions last between 15 and 300 seconds and do not grant an exclusive lock.
+Presence collections additionally include `tasks`, `task_checklist`, and
+`accounting_rules`.
 
 ## Live events and reconnect recovery
 
@@ -178,12 +181,79 @@ List persisted routine and accounting tasks:
 GET /api/structuraloffice/v1/tasks?status=open&source_type=routine&limit=100&offset=0
 ```
 
-`source_type` is `routine` for recurring work and `accounting_due_batch` for automatic
-invoice follow-up tasks. Routine tasks snapshot their topic metadata and checklist when
-materialized. Recurrence definitions support one-time, daily, weekly, monthly, and yearly
-schedules, multiple weekdays or month days, explicit dates, intervals, start and end
-dates, reminder offsets, catch-up policy, invalid-date handling, and business-day
-adjustment.
+`source_type` is `routine` for recurring work, `accounting_due_batch` for automatic
+invoice follow-up tasks, and `manual` for standalone work. Routine tasks snapshot their
+topic metadata and checklist when materialized. Recurrence definitions support one-time,
+daily, weekly, monthly, and yearly schedules, multiple weekdays or month days, explicit
+dates, intervals, start and end dates, reminder offsets, catch-up policy, invalid-date
+handling, business-day adjustment, and explicit non-working dates.
+
+Create and update standalone or materialized tasks:
+
+```http
+POST /api/structuraloffice/v1/tasks
+
+{
+  "title": "Prepare quarterly report",
+  "due_at": "2026-10-01T09:00:00+02:00",
+  "priority": "high",
+  "checklist": ["Collect figures", "Review report"]
+}
+```
+
+```http
+PATCH /api/structuraloffice/v1/tasks/<task-id>
+
+{
+  "expected_revision": 1,
+  "data": {
+    "status": "in_progress",
+    "completion_note": "Preparation started"
+  }
+}
+```
+
+Mutable task fields are `status`, `priority`, `due_at`, and `completion_note`. Checklist
+items are independently revisioned:
+
+```http
+PATCH /api/structuraloffice/v1/tasks/<task-id>/checklist/<item-id>
+
+{
+  "expected_revision": 1,
+  "data": {
+    "completed": true,
+    "note": "Verified against the ledger"
+  }
+}
+```
+
+Task and checklist writes emit persistent change events and audit metadata. Stale writes
+return HTTP 409 with the current task or checklist item.
+
+## Reminder catch-up
+
+Each routine chooses one policy:
+
+- `configured_window` sends every missed reminder still inside the Home Assistant
+  catch-up window.
+- `latest_only` sends only the newest eligible reminder for each task.
+- `skip_missed` accepts only reminders inside the normal scheduler interval.
+
+Scheduling uses the routine's validated IANA timezone. Successful deliveries are stored
+in SQLite, preventing duplicate sends after Home Assistant restarts.
+
+## Import history
+
+```http
+GET /api/structuraloffice/v1/imports?limit=100&offset=0
+GET /api/structuraloffice/v1/imports/<import-id>
+GET /api/structuraloffice/v1/imports/<import-id>/source
+```
+
+The list contains source metadata and aggregate counts but not source contents. Details
+include row fingerprints and invoice numbers. Only administrators may download the
+retained original CSV source.
 
 ## Grouped accounting tasks
 
@@ -222,7 +292,7 @@ tasks after 14, 30, and 60 days. An editor or administrator can update a rule wi
 optimistic revision protection:
 
 ```http
-PATCH /api/structuraloffice/v1/accounting/rules/payment-reminder
+PATCH /api/structuraloffice/v1/accounting/rules/payment-reminder-default
 
 {
   "expected_revision": 1,
@@ -237,8 +307,7 @@ PATCH /api/structuraloffice/v1/accounting/rules/payment-reminder
 ```
 
 Mutable fields are `days_after_due`, `evaluation_time`, `minimum_open_invoices`,
-`maximum_invoices_per_batch`, `auto_complete_empty_batches`, `notify_enabled`, and
-`enabled`.
+`auto_complete_empty_batches`, `notify_enabled`, and `enabled`.
 
 ## Administrative endpoints
 

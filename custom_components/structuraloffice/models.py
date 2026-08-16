@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from datetime import date, datetime, timedelta
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .const import STATUS_OPEN, VALID_STATUSES
 
@@ -150,6 +151,11 @@ def validate_routine(
     catch_up_policy = str(value.get("catch_up_policy", "configured_window"))
     if catch_up_policy not in {"configured_window", "latest_only", "skip_missed"}:
         raise StructuralOfficeValidationError("Invalid catch-up policy")
+    timezone = _text(value.get("timezone"), "Timezone") or "Europe/Berlin"
+    try:
+        ZoneInfo(timezone)
+    except ZoneInfoNotFoundError as err:
+        raise StructuralOfficeValidationError("Unknown timezone") from err
 
     return {
         "id": existing_id or _text(value.get("id"), "ID") or new_id(),
@@ -160,7 +166,7 @@ def validate_routine(
         "schedule": schedule,
         "due_time": due_time,
         "reminder_offsets": reminders,
-        "timezone": _text(value.get("timezone"), "Timezone") or "Europe/Berlin",
+        "timezone": timezone,
         "end_date": end_date,
         "catch_up_policy": catch_up_policy,
     }
@@ -190,6 +196,12 @@ def _validate_schedule(value: Any) -> dict[str, Any]:
     dates = sorted(
         {_parse_date(item, "Due date").isoformat() for item in value.get("dates", [])}
     )
+    non_working_dates = sorted(
+        {
+            _parse_date(item, "Non-working date").isoformat()
+            for item in value.get("non_working_dates", [])
+        }
+    )
     if frequency == "once" and not dates:
         dates = [start_date.isoformat()]
 
@@ -210,6 +222,7 @@ def _validate_schedule(value: Any) -> dict[str, Any]:
         "dates": dates,
         "business_day_rule": business_day_rule,
         "invalid_day_rule": invalid_day_rule,
+        "non_working_dates": non_working_dates,
     }
 
 
@@ -234,22 +247,28 @@ def iter_due_dates(routine: dict[str, Any], start: date, end: date) -> Iterable[
     if end < start:
         return
     seen: set[date] = set()
+    non_working_dates = {
+        date.fromisoformat(item)
+        for item in routine["schedule"].get("non_working_dates", [])
+    }
     for candidate in _iter_base_due_dates(
         routine, start - timedelta(days=3), end + timedelta(days=3)
     ):
         adjusted = _adjust_business_day(
-            candidate, routine["schedule"].get("business_day_rule", "none")
+            candidate,
+            routine["schedule"].get("business_day_rule", "none"),
+            non_working_dates,
         )
         if start <= adjusted <= end and adjusted not in seen:
             seen.add(adjusted)
             yield adjusted
 
 
-def _adjust_business_day(value: date, rule: str) -> date:
-    if rule == "none" or value.weekday() < 5:
+def _adjust_business_day(value: date, rule: str, non_working_dates: set[date]) -> date:
+    if rule == "none":
         return value
     direction = -1 if rule == "previous_business_day" else 1
-    while value.weekday() >= 5:
+    while value.weekday() >= 5 or value in non_working_dates:
         value += timedelta(days=direction)
     return value
 

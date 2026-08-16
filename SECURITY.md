@@ -26,3 +26,9 @@ Live change notifications deliberately contain record identifiers, revision numb
 operations, and changed field names only. Business payloads remain behind authenticated
 REST endpoints. Edit-presence sessions expire automatically and are advisory; revision
 checks and SQLite transactions enforce data integrity.
+
+Invoice-import metadata follows normal viewer permissions, while downloading a retained
+original CSV source requires the StructuralOffice administrator role. Task, checklist,
+and accounting-rule writes require editor access and an expected revision. Generated
+payment-reminder and dunning documents are returned only after an explicit authenticated
+request and are never sent automatically.

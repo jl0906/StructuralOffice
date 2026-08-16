@@ -1,0 +1,382 @@
+openapi: 3.1.0
+info:
+  title: StructuralOffice API
+  version: 0.7.0-alpha
+  description: Backend API for the separately developed StructuralOffice Windows client.
+servers:
+  - url: /api/structuraloffice/v1
+security:
+  - homeAssistantToken: []
+paths:
+  /status:
+    get:
+      summary: Return backend and database health
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /invoices:
+    get:
+      summary: List normalized invoices
+      parameters:
+        - $ref: "#/components/parameters/Status"
+        - name: due_state
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /live/{collection}:
+    parameters:
+      - $ref: "#/components/parameters/Collection"
+    get:
+      summary: List revisioned live records
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+    post:
+      summary: Create a revisioned live record
+      requestBody:
+        $ref: "#/components/requestBodies/JsonBody"
+      responses:
+        "201":
+          $ref: "#/components/responses/JsonSuccess"
+  /live/{collection}/{record_id}:
+    parameters:
+      - $ref: "#/components/parameters/Collection"
+      - $ref: "#/components/parameters/RecordId"
+    get:
+      summary: Read one revisioned live record
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+    patch:
+      summary: Update a live record with an expected revision
+      requestBody:
+        $ref: "#/components/requestBodies/RevisionedPatch"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      summary: Archive one live record
+      parameters:
+        - $ref: "#/components/parameters/ExpectedRevision"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /editing/{collection}/{record_id}:
+    parameters:
+      - name: collection
+        in: path
+        required: true
+        schema:
+          type: string
+      - $ref: "#/components/parameters/RecordId"
+    get:
+      summary: List active editors
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+    post:
+      summary: Start or refresh an edit-presence session
+      requestBody:
+        $ref: "#/components/requestBodies/JsonBody"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+    delete:
+      summary: End an edit-presence session
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /tasks:
+    get:
+      summary: List materialized routine, accounting, and manual tasks
+      parameters:
+        - $ref: "#/components/parameters/Status"
+        - name: source_type
+          in: query
+          schema:
+            enum: [routine, accounting_due_batch, manual]
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+    post:
+      summary: Create a standalone task
+      requestBody:
+        $ref: "#/components/requestBodies/JsonBody"
+      responses:
+        "201":
+          $ref: "#/components/responses/JsonSuccess"
+  /tasks/{task_id}:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+    get:
+      summary: Read one task with its checklist
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+    patch:
+      summary: Update task status, priority, due time, or completion note
+      requestBody:
+        $ref: "#/components/requestBodies/RevisionedPatch"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /tasks/{task_id}/checklist/{item_id}:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+      - name: item_id
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      summary: Update one checklist item
+      requestBody:
+        $ref: "#/components/requestBodies/RevisionedPatch"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /accounting/tasks:
+    get:
+      summary: List grouped unpaid-invoice tasks
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /accounting/tasks/{batch_id}/invoices:
+    get:
+      summary: Return the exact invoice membership of a grouped task
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /accounting/rules:
+    get:
+      summary: List accounting task-generation rules
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /accounting/rules/{rule_id}:
+    patch:
+      summary: Update one accounting task-generation rule
+      parameters:
+        - name: rule_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        $ref: "#/components/requestBodies/RevisionedPatch"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /imports/invoice-list:
+    post:
+      summary: Preview or apply a base64-encoded invoice-list CSV
+      requestBody:
+        $ref: "#/components/requestBodies/JsonBody"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /imports:
+    get:
+      summary: List retained invoice import batches
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /imports/{import_id}:
+    get:
+      summary: Read one import and its row fingerprints
+      parameters:
+        - $ref: "#/components/parameters/ImportId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /imports/{import_id}/source:
+    get:
+      summary: Download the retained original source as an administrator
+      parameters:
+        - $ref: "#/components/parameters/ImportId"
+      responses:
+        "200":
+          description: Original CSV source
+          content:
+            text/csv:
+              schema:
+                type: string
+                contentEncoding: binary
+  /documents:
+    post:
+      summary: Explicitly generate payment-reminder or dunning documents
+      requestBody:
+        $ref: "#/components/requestBodies/JsonBody"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /events:
+    get:
+      summary: Retrieve missed live events after a sequence cursor
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /audit:
+    get:
+      summary: Return administrator-visible audit metadata
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /roles:
+    get:
+      summary: List StructuralOffice user roles
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+    put:
+      summary: Assign a StructuralOffice user role
+      requestBody:
+        $ref: "#/components/requestBodies/JsonBody"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /backups:
+    get:
+      summary: List managed database backups
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+    post:
+      summary: Create a managed database backup
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /backups/{filename}:
+    parameters:
+      - name: filename
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: Download a managed database backup
+      responses:
+        "200":
+          description: SQLite database file
+    post:
+      summary: Restore a managed database backup
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+    delete:
+      summary: Delete a managed database backup
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+components:
+  securitySchemes:
+    homeAssistantToken:
+      type: http
+      scheme: bearer
+  parameters:
+    Collection:
+      name: collection
+      in: path
+      required: true
+      schema:
+        enum: [contacts, topics, routines, occurrences, invoices]
+    RecordId:
+      name: record_id
+      in: path
+      required: true
+      schema:
+        type: string
+    TaskId:
+      name: task_id
+      in: path
+      required: true
+      schema:
+        type: string
+    ImportId:
+      name: import_id
+      in: path
+      required: true
+      schema:
+        type: string
+    ExpectedRevision:
+      name: expected_revision
+      in: query
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+    Status:
+      name: status
+      in: query
+      schema:
+        enum: [open, in_progress, completed, skipped, cancelled, auto_completed]
+  requestBodies:
+    JsonBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: true
+    RevisionedPatch:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [expected_revision, data]
+            properties:
+              expected_revision:
+                type: integer
+                minimum: 0
+              data:
+                type: object
+                additionalProperties: true
+  responses:
+    JsonSuccess:
+      description: Successful JSON response
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: true
+    Conflict:
+      description: The expected revision is stale
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [code, current, error]
+            properties:
+              code:
+                const: revision_conflict
+              current:
+                type: object
+                additionalProperties: true
+              error:
+                type: string

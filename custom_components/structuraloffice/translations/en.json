@@ -1,0 +1,44 @@
+{
+  "config": {
+    "abort": {
+      "single_instance_allowed": "Only one StructuralOffice instance can be configured."
+    },
+    "step": {
+      "user": {
+        "data": {
+          "catch_up_hours": "Catch up missed reminders (hours)",
+          "default_reminder_time": "Default reminder time",
+          "notify_targets": "Notification devices",
+          "company_name": "Company name",
+          "company_address": "Company address",
+          "company_email": "Email address"
+        },
+        "data_description": {
+          "catch_up_hours": "How long a reminder missed during downtime may still be sent.",
+          "notify_targets": "One or more notify entities, for example your phone."
+        },
+        "description": "Set up StructuralOffice and choose the devices for push notifications.",
+        "title": "Set up StructuralOffice"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "catch_up_hours": "Catch up missed reminders (hours)",
+          "default_reminder_time": "Default reminder time",
+          "notify_targets": "Notification devices",
+          "company_name": "Company name",
+          "company_address": "Company address",
+          "company_email": "Email address"
+        },
+        "data_description": {
+          "catch_up_hours": "Set to 0 to disable catch-up.",
+          "notify_targets": "These targets receive StructuralOffice reminders."
+        },
+        "title": "StructuralOffice settings"
+      }
+    }
+  }
+}

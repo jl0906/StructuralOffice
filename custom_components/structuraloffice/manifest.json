@@ -1,0 +1,14 @@
+{
+  "codeowners": ["@jl0906"],
+  "config_flow": true,
+  "dependencies": ["frontend", "http"],
+  "documentation": "https://github.com/jl0906/StructuralOffice",
+  "domain": "structuraloffice",
+  "integration_type": "helper",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/jl0906/StructuralOffice/issues",
+  "name": "StructuralOffice",
+  "requirements": ["openpyxl==3.1.5", "reportlab==5.0.0"],
+  "single_config_entry": true,
+  "version": "0.3.0"
+}

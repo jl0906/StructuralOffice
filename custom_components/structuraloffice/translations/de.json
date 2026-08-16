@@ -1,0 +1,44 @@
+{
+  "config": {
+    "abort": {
+      "single_instance_allowed": "StructuralOffice kann nur einmal eingerichtet werden."
+    },
+    "step": {
+      "user": {
+        "data": {
+          "catch_up_hours": "Verpasste Erinnerungen nachholen (Stunden)",
+          "default_reminder_time": "Standardzeit für Erinnerungen",
+          "notify_targets": "Benachrichtigungsgeräte",
+          "company_name": "Firmenname",
+          "company_address": "Firmenanschrift",
+          "company_email": "E-Mail-Adresse"
+        },
+        "data_description": {
+          "catch_up_hours": "Wie lange eine während eines Ausfalls verpasste Erinnerung noch gesendet werden darf.",
+          "notify_targets": "Eine oder mehrere Notify-Entitäten, beispielsweise dein Smartphone."
+        },
+        "description": "Richte StructuralOffice ein und wähle die Geräte für Pushbenachrichtigungen.",
+        "title": "StructuralOffice einrichten"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "catch_up_hours": "Verpasste Erinnerungen nachholen (Stunden)",
+          "default_reminder_time": "Standardzeit für Erinnerungen",
+          "notify_targets": "Benachrichtigungsgeräte",
+          "company_name": "Firmenname",
+          "company_address": "Firmenanschrift",
+          "company_email": "E-Mail-Adresse"
+        },
+        "data_description": {
+          "catch_up_hours": "0 deaktiviert das Nachholen.",
+          "notify_targets": "Diese Ziele erhalten Erinnerungen aus StructuralOffice."
+        },
+        "title": "StructuralOffice Einstellungen"
+      }
+    }
+  }
+}

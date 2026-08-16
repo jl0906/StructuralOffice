@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="StructuralOffice">
+  <rect x="16" y="16" width="224" height="224" rx="52" fill="#0f766e"/>
+  <path d="M55 102 128 57l73 45v16H55z" fill="#ccfbf1"/>
+  <path d="M68 118h120v70H68z" fill="#ffffff"/>
+  <path d="M85 124h20v58H85zm43 0h20v58h-20zm43 0h10v58h-10z" fill="#0f766e"/>
+  <path d="M55 188h146v16H55z" fill="#ccfbf1"/>
+  <circle cx="188" cy="177" r="34" fill="#14b8a6" stroke="#ffffff" stroke-width="8"/>
+  <path d="m171 177 11 11 23-27" fill="none" stroke="#ffffff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

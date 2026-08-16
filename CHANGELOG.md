@@ -5,6 +5,49 @@ All notable changes to StructuralOffice are documented in this file. The format 
 
 ## [Unreleased]
 
+### Added
+
+- Native Windows desktop foundation with Home Assistant connectivity, authentication,
+  and StructuralOffice integration checks.
+- Self-contained per-user Windows package with Start-menu shortcuts and Installed Apps
+  registration.
+- Backend abstraction and standalone placeholder for a future local-only release.
+
+### Changed
+
+- Removed all invoice statistics from the Home Assistant panel. Invoice information
+  remains available only through the authenticated Windows-client API.
+
+## [0.5.0-alpha] - 2026-08-16
+
+### Added
+
+- Revisioned live editing for contacts, topics, routines, generated occurrences, and
+  invoices through the authenticated REST API.
+- Transactional optimistic concurrency control using an expected record revision.
+- Automatic field-level merging when intervening changes do not overlap.
+- HTTP 409 conflict responses containing the current server record when fields overlap.
+- Expiring edit-presence sessions with multiple visible editors per record.
+- Role-protected WebSocket subscription for immediate record and presence events.
+- Persistent change-event sequence numbers for reconnect catch-up.
+- Audit metadata for live creates, updates, merges, and archives.
+- Paginated live-record, event, audit, and REST role-management endpoints.
+- Contact records and live task-status editing.
+- Concurrent-writer and version-1-to-version-2 database migration tests.
+
+### Changed
+
+- The database schema is now version 2.
+- Deletion through the live API archives business records instead of removing them.
+- Existing snapshot writes preserve record revisions rather than recreating every row.
+- The frontend cache and integration version are now `0.5.0-alpha`.
+
+### Security
+
+- Live WebSocket subscriptions enforce StructuralOffice roles before registration.
+- Live events omit business payloads; authorized clients fetch records through the API.
+- Audit entries exclude access tokens and complete record payloads.
+
 ## [0.4.0-alpha] - 2026-08-16
 
 ### Added
@@ -111,7 +154,8 @@ All notable changes to StructuralOffice are documented in this file. The format 
 - Push notifications to selected `notify` entities
 - Task states, sensors, calendar support, and local storage
 
-[Unreleased]: https://github.com/jl0906/StructuralOffice/compare/v0.4.0-alpha...HEAD
+[Unreleased]: https://github.com/jl0906/StructuralOffice/compare/v0.5.0-alpha...HEAD
+[0.5.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.4.0-alpha...v0.5.0-alpha
 [0.4.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.3.0-alpha...v0.4.0-alpha
 [0.3.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.2.0...v0.3.0-alpha
 [0.2.0]: https://github.com/jl0906/StructuralOffice/compare/v0.1.0...v0.2.0

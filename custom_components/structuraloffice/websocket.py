@@ -7,13 +7,14 @@ import binascii
 
 import voluptuous as vol
 from homeassistant.components import websocket_api
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, HomeAssistant, callback
 
 from .const import (
     CONF_COMPANY_ADDRESS,
     CONF_COMPANY_EMAIL,
     CONF_COMPANY_NAME,
     DOMAIN,
+    LIVE_UPDATE_EVENT,
 )
 from .csv_export import csv_filename, export_invoices_csv
 from .excel import export_invoices_xlsx, load_template_xlsx, parse_invoices_xlsx
@@ -59,6 +60,26 @@ async def ws_get_data(hass, connection, msg) -> None:
         result = manager.system_data()
         result["access"] = role
         connection.send_result(msg["id"], result)
+    except StructuralOfficeValidationError as err:
+        _error(connection, msg, err)
+
+
+@websocket_api.async_response
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/subscribe_live"})
+async def ws_subscribe_live(hass, connection, msg) -> None:
+    """Subscribe an authorized Windows client to live record and presence events."""
+    try:
+        manager = _manager(hass)
+        _require_role(manager, connection, READ_ROLES)
+
+        @callback
+        def forward_event(event: Event) -> None:
+            connection.send_event(msg["id"], event.data)
+
+        connection.subscriptions[msg["id"]] = hass.bus.async_listen(
+            LIVE_UPDATE_EVENT, forward_event
+        )
+        connection.send_result(msg["id"])
     except StructuralOfficeValidationError as err:
         _error(connection, msg, err)
 
@@ -309,7 +330,7 @@ def _download(content: bytes, filename: str) -> dict[str, str]:
 def async_register(hass: HomeAssistant) -> None:
     """Register StructuralOffice WebSocket commands."""
     for command in (
-        ws_get_data, ws_set_user_role, ws_upsert_topic, ws_delete_topic,
+        ws_get_data, ws_subscribe_live, ws_set_user_role, ws_upsert_topic, ws_delete_topic,
         ws_upsert_routine, ws_delete_routine, ws_set_occurrence_status,
         ws_test_notification, ws_upsert_invoice, ws_delete_invoice,
         ws_preview_invoice_import, ws_apply_invoice_import, ws_export_invoices,

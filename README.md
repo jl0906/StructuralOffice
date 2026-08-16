@@ -5,9 +5,14 @@ invoice due-date monitoring. The operational desktop interface is being moved to
 separate Windows application. Home Assistant now provides database health statistics
 and managed backup controls only.
 
-## Version 0.4.0-alpha
+The initial native Windows client is available under `windows/`. It opens as a
+self-contained desktop application and verifies Home Assistant connectivity,
+authentication, and the installed StructuralOffice integration. Its backend boundary
+is intentionally prepared for a future standalone mode.
 
-This release introduces the backend boundary planned for the Windows client:
+## Version 0.5.0-alpha
+
+This release extends the backend boundary with safe live editing for the Windows client:
 
 - Dedicated, versioned SQLite database at
   `/config/structuraloffice/structuraloffice.db`
@@ -26,6 +31,16 @@ This release introduces the backend boundary planned for the Windows client:
 - Consistent SQLite backup creation, download, integrity validation, restoration, and
   deletion from the Home Assistant panel
 - Database-size, record-count, backup-count, and import-count sensors
+- Revisioned live records for contacts, topics, routines, occurrences, and invoices
+- Field-level updates with optimistic concurrency control
+- Automatic merging when concurrent clients changed different fields
+- `409 Conflict` responses when clients changed the same field
+- Expiring edit-presence sessions showing who currently has a record open
+- Authorized WebSocket subscriptions for immediate record and presence events
+- Persistent event cursors for catching up after a lost connection
+- Audit metadata for every live create, update, merge, and archive operation
+- REST role administration for the future Windows client
+- Database schema migration from version 1 to version 2
 
 StructuralOffice never creates payment reminders or dunning notices automatically.
 The backend only calculates invoice due states. A document is generated only after an
@@ -42,9 +57,9 @@ Until the repository is included in the default HACS repository list:
 5. Configure the default payment term and whether a SEPA debit date overrides it.
 
 The StructuralOffice sidebar panel is restricted to Home Assistant administrators. It
-contains backend statistics and backup management. Operational topics, routines,
-invoice imports, invoice lists, and document workflows are intended for the Windows
-application.
+contains database statistics and backup management only. Invoice statistics, operational
+topics, routines, invoice imports, invoice lists, and document workflows are intended
+for the Windows application.
 
 ## Invoice-list CSV rules
 
@@ -74,10 +89,19 @@ The API uses Home Assistant authentication. Clients send a valid Home Assistant 
 token in the `Authorization` header. Authorization is additionally limited by the
 StructuralOffice administrator, editor, and viewer roles.
 
+The complete request, revision, presence, conflict, and reconnect contract is documented
+in [API.md](API.md).
+
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/structuraloffice/v1/status` | Backend and database status |
 | `GET` | `/api/structuraloffice/v1/invoices` | Normalized invoices; supports `status` and `due_state` filters |
+| `GET/POST` | `/api/structuraloffice/v1/live/{collection}` | Page or create live records |
+| `GET/PATCH/DELETE` | `/api/structuraloffice/v1/live/{collection}/{id}` | Read, update, or archive a revisioned record |
+| `GET/POST/DELETE` | `/api/structuraloffice/v1/editing/{collection}/{id}` | Read, start, refresh, or end edit presence |
+| `GET` | `/api/structuraloffice/v1/events` | Retrieve missed events after a sequence cursor |
+| `GET` | `/api/structuraloffice/v1/audit` | Administrator-only audit metadata |
+| `GET/PUT` | `/api/structuraloffice/v1/roles` | Administrator-only role management |
 | `POST` | `/api/structuraloffice/v1/imports/invoice-list` | Preview or apply a base64-encoded CSV import |
 | `POST` | `/api/structuraloffice/v1/documents` | Explicitly generate one PDF or a ZIP batch |
 | `GET/POST` | `/api/structuraloffice/v1/backups` | List or create backups |
@@ -90,6 +114,26 @@ The import request contains `filename`, base64-encoded `content`, and `apply`. U
 Document requests specify `document_type` (`payment_reminder`, `dunning_1`,
 `dunning_2`, or `dunning_3`) and either `invoice_numbers` or
 `invoice_number_from`/`invoice_number_to`. Only open receivables are eligible.
+
+## Live editing contract
+
+Every live record is returned in an envelope containing `id`, `collection`, `data`,
+`revision`, `created_at`, `updated_at`, and `archived_at`. Updates send only the changed
+fields together with `expected_revision`. A current revision is committed immediately.
+If the revision is stale but all intervening events changed different fields, the server
+merges the patch transactionally. If any field overlaps, the API responds with HTTP 409
+and includes the current server record.
+
+Clients subscribe with the Home Assistant WebSocket command
+`structuraloffice/subscribe_live`. Events contain collection, record ID, operation,
+revision, sequence, and changed field names, but no business payload. After reconnecting,
+the client requests `/api/structuraloffice/v1/events?after=<sequence>` before resuming its
+live subscription.
+
+Edit presence is advisory rather than an exclusive lock. A client starts a session when
+a record is opened, refreshes it before expiry, and ends it when the editor closes. This
+allows other users to see concurrent editors while revision checks remain the final data
+integrity mechanism.
 
 ## Backup and privacy
 

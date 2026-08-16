@@ -14,6 +14,7 @@ from homeassistant.exceptions import Unauthorized
 
 from .accounting import DIRECTION_RECEIVABLE, INVOICE_STATUS_OPEN
 from .const import CONF_COMPANY_ADDRESS, CONF_COMPANY_EMAIL, CONF_COMPANY_NAME, DOMAIN
+from .database import StructuralOfficeConflictError
 from .manager import StructuralOfficeManager
 from .models import StructuralOfficeValidationError
 from .pdf_document import build_invoice_pdf
@@ -47,6 +48,18 @@ def _safe_filename(value: str) -> str:
     return "".join(char if char.isalnum() or char in "-_" else "-" for char in value)
 
 
+def _identity(request: web.Request) -> tuple[str, str]:
+    user = request["hass_user"]
+    return user.id, user.name or user.id
+
+
+def _integer(value: str | None, default: int, field: str) -> int:
+    try:
+        return int(value) if value is not None else default
+    except ValueError as err:
+        raise StructuralOfficeValidationError(f"{field} must be an integer") from err
+
+
 class StructuralOfficeStatusView(HomeAssistantView):
     """Expose non-sensitive service and database status."""
 
@@ -75,6 +88,244 @@ class StructuralOfficeInvoicesView(HomeAssistantView):
         if status:
             invoices = [item for item in invoices if item["status"] == status]
         return self.json({"invoices": invoices})
+
+
+class StructuralOfficeLiveCollectionView(HomeAssistantView):
+    """List and create revisioned records for the Windows client."""
+
+    url = f"{API_PREFIX}/live/{{collection}}"
+    name = f"api:{DOMAIN}:v1:live-collection"
+
+    async def get(self, request: web.Request, collection: str) -> web.Response:
+        _role(request)
+        try:
+            result = await _manager(request).async_live_list(
+                collection,
+                include_archived=request.query.get("include_archived") == "true",
+                limit=_integer(request.query.get("limit"), 100, "limit"),
+                offset=_integer(request.query.get("offset"), 0, "offset"),
+            )
+            return self.json(result)
+        except StructuralOfficeValidationError as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+    async def post(self, request: web.Request, collection: str) -> web.Response:
+        _role(request, write=True)
+        try:
+            payload = await request.json()
+            user_id, user_name = _identity(request)
+            result = await _manager(request).async_live_write(
+                collection,
+                payload.get("data", {}),
+                None,
+                payload.get("expected_revision"),
+                user_id,
+                user_name,
+            )
+            return self.json(result, status_code=201)
+        except StructuralOfficeConflictError as err:
+            return self.json(
+                {"code": "revision_conflict", "current": err.current, "error": str(err)},
+                status_code=409,
+            )
+        except (StructuralOfficeValidationError, TypeError, ValueError) as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+
+class StructuralOfficeLiveRecordView(HomeAssistantView):
+    """Read, update, or archive one revisioned record."""
+
+    url = f"{API_PREFIX}/live/{{collection}}/{{record_id}}"
+    name = f"api:{DOMAIN}:v1:live-record"
+
+    async def get(
+        self, request: web.Request, collection: str, record_id: str
+    ) -> web.Response:
+        _role(request)
+        try:
+            return self.json(await _manager(request).async_live_get(collection, record_id))
+        except StructuralOfficeValidationError as err:
+            return self.json({"code": "not_found", "error": str(err)}, status_code=404)
+
+    async def patch(
+        self, request: web.Request, collection: str, record_id: str
+    ) -> web.Response:
+        _role(request, write=True)
+        try:
+            payload = await request.json()
+            if "expected_revision" not in payload:
+                raise StructuralOfficeValidationError("expected_revision is required")
+            user_id, user_name = _identity(request)
+            result = await _manager(request).async_live_write(
+                collection,
+                payload.get("data", {}),
+                record_id,
+                int(payload["expected_revision"]),
+                user_id,
+                user_name,
+            )
+            return self.json(result)
+        except StructuralOfficeConflictError as err:
+            return self.json(
+                {"code": "revision_conflict", "current": err.current, "error": str(err)},
+                status_code=409,
+            )
+        except (StructuralOfficeValidationError, TypeError, ValueError) as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+    async def delete(
+        self, request: web.Request, collection: str, record_id: str
+    ) -> web.Response:
+        _role(request, write=True)
+        try:
+            expected_revision = _integer(
+                request.query.get("expected_revision"), -1, "expected_revision"
+            )
+            if expected_revision < 0:
+                raise StructuralOfficeValidationError("expected_revision is required")
+            user_id, user_name = _identity(request)
+            result = await _manager(request).async_live_archive(
+                collection, record_id, expected_revision, user_id, user_name
+            )
+            return self.json(result)
+        except StructuralOfficeConflictError as err:
+            return self.json(
+                {"code": "revision_conflict", "current": err.current, "error": str(err)},
+                status_code=409,
+            )
+        except (StructuralOfficeValidationError, ValueError) as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+
+class StructuralOfficeEditingView(HomeAssistantView):
+    """Manage expiring edit-presence sessions."""
+
+    url = f"{API_PREFIX}/editing/{{collection}}/{{record_id}}"
+    name = f"api:{DOMAIN}:v1:editing"
+
+    async def get(
+        self, request: web.Request, collection: str, record_id: str
+    ) -> web.Response:
+        _role(request)
+        try:
+            editors = await _manager(request).hass.async_add_executor_job(
+                _manager(request).database.active_edit_sessions, collection, record_id
+            )
+            return self.json({"editors": editors})
+        except StructuralOfficeValidationError as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+    async def post(
+        self, request: web.Request, collection: str, record_id: str
+    ) -> web.Response:
+        _role(request, write=True)
+        try:
+            payload = await request.json()
+            user_id, user_name = _identity(request)
+            result = await _manager(request).async_start_edit_session(
+                collection,
+                record_id,
+                str(payload.get("client_id") or "windows-client"),
+                user_id,
+                user_name,
+                int(payload.get("ttl_seconds", 60)),
+                payload.get("session_id"),
+            )
+            return self.json(result)
+        except (StructuralOfficeValidationError, TypeError, ValueError) as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+    async def delete(
+        self, request: web.Request, collection: str, record_id: str
+    ) -> web.Response:
+        _role(request, write=True)
+        session_id = str(request.query.get("session_id") or "")
+        if not session_id:
+            return self.json(
+                {"code": "invalid_request", "error": "session_id is required"},
+                status_code=400,
+            )
+        ended = await _manager(request).async_end_edit_session(
+            collection, record_id, session_id, request["hass_user"].id
+        )
+        return self.json({"ended": ended})
+
+
+class StructuralOfficeEventsView(HomeAssistantView):
+    """Return missed live events after a reconnect cursor."""
+
+    url = f"{API_PREFIX}/events"
+    name = f"api:{DOMAIN}:v1:events"
+
+    async def get(self, request: web.Request) -> web.Response:
+        _role(request)
+        try:
+            return self.json(
+                await _manager(request).async_events_since(
+                    _integer(request.query.get("after"), 0, "after"),
+                    _integer(request.query.get("limit"), 200, "limit"),
+                )
+            )
+        except StructuralOfficeValidationError as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+
+class StructuralOfficeAuditView(HomeAssistantView):
+    """Return administrator-visible change metadata."""
+
+    url = f"{API_PREFIX}/audit"
+    name = f"api:{DOMAIN}:v1:audit"
+
+    async def get(self, request: web.Request) -> web.Response:
+        _role(request, admin=True)
+        try:
+            return self.json(
+                await _manager(request).async_audit_entries(
+                    _integer(request.query.get("limit"), 100, "limit"),
+                    _integer(request.query.get("offset"), 0, "offset"),
+                )
+            )
+        except StructuralOfficeValidationError as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+
+class StructuralOfficeRolesView(HomeAssistantView):
+    """List and assign StructuralOffice roles for Windows-client administration."""
+
+    url = f"{API_PREFIX}/roles"
+    name = f"api:{DOMAIN}:v1:roles"
+
+    async def get(self, request: web.Request) -> web.Response:
+        _role(request, admin=True)
+        manager = _manager(request)
+        users = await manager.hass.auth.async_get_users()
+        return self.json(
+            {
+                "users": [
+                    {
+                        "id": user.id,
+                        "is_active": user.is_active,
+                        "is_admin": user.is_admin,
+                        "name": user.name or user.id,
+                        "role": manager.user_role(user.id, user.is_admin),
+                    }
+                    for user in users
+                    if not user.system_generated
+                ]
+            }
+        )
+
+    async def put(self, request: web.Request) -> web.Response:
+        _role(request, admin=True)
+        try:
+            payload = await request.json()
+            role = payload.get("role")
+            if role == "none":
+                role = None
+            await _manager(request).async_set_user_role(str(payload["user_id"]), role)
+            return self.json_message("Role updated")
+        except (KeyError, StructuralOfficeValidationError, TypeError) as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
 
 
 class StructuralOfficeInvoiceImportView(HomeAssistantView):
@@ -227,6 +478,12 @@ def async_register(hass: HomeAssistant) -> None:
     for view in (
         StructuralOfficeStatusView,
         StructuralOfficeInvoicesView,
+        StructuralOfficeLiveCollectionView,
+        StructuralOfficeLiveRecordView,
+        StructuralOfficeEditingView,
+        StructuralOfficeEventsView,
+        StructuralOfficeAuditView,
+        StructuralOfficeRolesView,
         StructuralOfficeInvoiceImportView,
         StructuralOfficeDocumentsView,
         StructuralOfficeBackupsView,

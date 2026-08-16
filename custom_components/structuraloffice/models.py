@@ -20,11 +20,13 @@ def new_id() -> str:
     return uuid4().hex
 
 
-def _text(value: Any, field: str, *, required: bool = False) -> str:
+def _text(
+    value: Any, field: str, *, required: bool = False, limit: int = 5000
+) -> str:
     result = str(value or "").strip()
     if required and not result:
         raise StructuralOfficeValidationError(f"{field} must not be empty")
-    if len(result) > 5000:
+    if len(result) > limit:
         raise StructuralOfficeValidationError(f"{field} is too long")
     return result
 
@@ -43,6 +45,21 @@ def validate_topic(value: dict[str, Any], existing_id: str | None = None) -> dic
         "description": _text(value.get("description"), "Description"),
         "category": _text(value.get("category"), "Category"),
         "checklist": checklist,
+    }
+
+
+def validate_contact(value: dict[str, Any], existing_id: str | None = None) -> dict[str, Any]:
+    """Validate and normalize a business contact."""
+    if not isinstance(value, dict):
+        raise StructuralOfficeValidationError("Contact must be an object")
+    return {
+        "address": _text(value.get("address"), "Address"),
+        "customer_number": _text(value.get("customer_number"), "Customer number"),
+        "email": _text(value.get("email"), "Email", limit=320),
+        "id": existing_id or _text(value.get("id"), "ID") or new_id(),
+        "name": _text(value.get("name"), "Name", required=True),
+        "note": _text(value.get("note"), "Note"),
+        "phone": _text(value.get("phone"), "Phone", limit=100),
     }
 
 

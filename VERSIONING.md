@@ -5,7 +5,7 @@ prereleases while the integration and Windows application are under development.
 
 ## Current status
 
-`0.4.0-alpha`
+`0.5.0-alpha`
 
 This version is intended for development and testing. It does not guarantee a stable
 database schema or a permanently compatible API.

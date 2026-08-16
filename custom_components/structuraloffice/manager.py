@@ -41,6 +41,7 @@ from .const import (
     DEFAULT_REMINDER_TIME,
     DEFAULT_SEPA_DATE_AS_DUE_DATE,
     DOMAIN,
+    LIVE_UPDATE_EVENT,
     SCHEDULER_INTERVAL,
     STATUS_OPEN,
     STORAGE_KEY_PREFIX,
@@ -54,6 +55,7 @@ from .models import (
     StructuralOfficeValidationError,
     iter_due_dates,
     occurrence_id,
+    validate_contact,
     validate_routine,
     validate_topic,
 )
@@ -86,6 +88,7 @@ class StructuralOfficeManager:
     @staticmethod
     def _empty_data() -> dict[str, Any]:
         return {
+            "contacts": {},
             "topics": {},
             "routines": {},
             "occurrences": {},
@@ -151,6 +154,10 @@ class StructuralOfficeManager:
         await self.hass.async_add_executor_job(self.database.save, self.data)
         await self._async_refresh_database_stats()
         self._notify_changed()
+        self.hass.bus.async_fire(
+            LIVE_UPDATE_EVENT,
+            {"operation": "refresh", "reason": "legacy_write"},
+        )
 
     async def _async_refresh_database_stats(self) -> None:
         self.database_stats = await self.hass.async_add_executor_job(
@@ -206,6 +213,260 @@ class StructuralOfficeManager:
         else:
             self.data["user_roles"][user_id] = role
         await self._async_save()
+
+    def _validate_live_record(
+        self, collection: str, raw: dict[str, Any], record_id: str | None
+    ) -> dict[str, Any]:
+        """Validate a record written by a live Windows client."""
+        value = dict(raw)
+        if record_id:
+            value["id"] = record_id
+        if collection == "contacts":
+            return validate_contact(value, record_id)
+        if collection == "topics":
+            return validate_topic(value, record_id)
+        if collection == "routines":
+            return validate_routine(value, set(self.data["topics"]), record_id)
+        if collection == "invoices":
+            return validate_invoice(value, record_id)
+        if collection == "occurrences":
+            if not record_id or not self._occurrence_exists(record_id):
+                raise StructuralOfficeValidationError("Task was not found")
+            status = str(value.get("status", ""))
+            if status not in VALID_STATUSES:
+                raise StructuralOfficeValidationError("Invalid status")
+            return {
+                "status": status,
+                "updated_at": dt_util.utcnow().isoformat(),
+            }
+        raise StructuralOfficeValidationError("Unknown record collection")
+
+    async def async_live_list(
+        self,
+        collection: str,
+        *,
+        include_archived: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Return a page of revisioned live records."""
+        if collection == "occurrences":
+            today = dt_util.now().date()
+            generated = self.build_occurrences(
+                today - timedelta(days=365), today + timedelta(days=365)
+            )
+            states = await self.hass.async_add_executor_job(
+                partial(
+                    self.database.list_live_records,
+                    collection,
+                    include_archived=include_archived,
+                    limit=500,
+                    offset=0,
+                )
+            )
+            revisions = {item["id"]: item for item in states["items"]}
+            items = []
+            for occurrence in generated:
+                state = revisions.get(occurrence["id"])
+                items.append(
+                    {
+                        "archived_at": None,
+                        "collection": collection,
+                        "created_at": state["created_at"] if state else None,
+                        "data": occurrence,
+                        "id": occurrence["id"],
+                        "revision": state["revision"] if state else 0,
+                        "updated_at": state["updated_at"] if state else None,
+                    }
+                )
+            return {
+                "items": items[offset : offset + limit],
+                "limit": limit,
+                "offset": offset,
+                "total": len(items),
+            }
+        return await self.hass.async_add_executor_job(
+            partial(
+                self.database.list_live_records,
+                collection,
+                include_archived=include_archived,
+                limit=limit,
+                offset=offset,
+            )
+        )
+
+    async def async_live_get(self, collection: str, record_id: str) -> dict[str, Any]:
+        """Return one revisioned live record."""
+        result = await self.hass.async_add_executor_job(
+            self.database.get_live_record, collection, record_id
+        )
+        if collection == "occurrences":
+            try:
+                raw_date = record_id.rsplit(":", 1)[1]
+                due = date.fromisoformat(raw_date)
+            except (IndexError, ValueError) as err:
+                raise StructuralOfficeValidationError("Task was not found") from err
+            occurrence = next(
+                (item for item in self.build_occurrences(due, due) if item["id"] == record_id),
+                None,
+            )
+            if occurrence:
+                if result:
+                    occurrence["status"] = result["data"].get(
+                        "status", occurrence["status"]
+                    )
+                return {
+                    "archived_at": result["archived_at"] if result else None,
+                    "collection": collection,
+                    "created_at": result["created_at"] if result else None,
+                    "data": occurrence,
+                    "id": record_id,
+                    "revision": result["revision"] if result else 0,
+                    "updated_at": result["updated_at"] if result else None,
+                }
+        if result is None:
+            raise StructuralOfficeValidationError("Record was not found")
+        return result
+
+    async def async_live_write(
+        self,
+        collection: str,
+        raw: dict[str, Any],
+        record_id: str | None,
+        expected_revision: int | None,
+        user_id: str,
+        user_name: str,
+    ) -> dict[str, Any]:
+        """Validate and commit one live record change."""
+        merged = dict(self.data.get(collection, {}).get(record_id, {}))
+        merged.update(raw)
+        normalized = self._validate_live_record(collection, merged, record_id)
+        record_id = normalized.get("id") or record_id
+        if not record_id:
+            raise StructuralOfficeValidationError("Record ID is required")
+        result = await self.hass.async_add_executor_job(
+            self.database.write_live_record,
+            collection,
+            record_id,
+            normalized,
+            expected_revision,
+            user_id,
+            user_name,
+            set(raw),
+        )
+        self.data[collection][record_id] = result["data"]
+        await self._async_refresh_database_stats()
+        self._fire_live_event(result)
+        return result
+
+    async def async_live_archive(
+        self,
+        collection: str,
+        record_id: str,
+        expected_revision: int,
+        user_id: str,
+        user_name: str,
+    ) -> dict[str, Any]:
+        """Archive a live record after applying business constraints."""
+        if collection == "topics":
+            used_by = [
+                item["name"]
+                for item in self.data["routines"].values()
+                if record_id in item["topic_ids"]
+            ]
+            if used_by:
+                raise StructuralOfficeValidationError(
+                    f"Topic is still in use: {', '.join(used_by)}"
+                )
+        result = await self.hass.async_add_executor_job(
+            self.database.archive_live_record,
+            collection,
+            record_id,
+            expected_revision,
+            user_id,
+            user_name,
+        )
+        self.data[collection].pop(record_id, None)
+        await self._async_refresh_database_stats()
+        self._fire_live_event(result)
+        return result
+
+    def _fire_live_event(self, result: dict[str, Any]) -> None:
+        event = {
+            "changed_fields": result.get("changed_fields", []),
+            "collection": result["collection"],
+            "operation": result["operation"],
+            "record_id": result["id"],
+            "revision": result["revision"],
+            "sequence": result["event_sequence"],
+        }
+        self.hass.bus.async_fire(LIVE_UPDATE_EVENT, event)
+        self._notify_changed()
+
+    async def async_start_edit_session(
+        self,
+        collection: str,
+        record_id: str,
+        client_id: str,
+        user_id: str,
+        user_name: str,
+        ttl_seconds: int,
+        session_id: str | None,
+    ) -> dict[str, Any]:
+        """Start or refresh a soft edit-presence session."""
+        result = await self.hass.async_add_executor_job(
+            self.database.start_edit_session,
+            collection,
+            record_id,
+            client_id,
+            user_id,
+            user_name,
+            ttl_seconds,
+            session_id,
+        )
+        self.hass.bus.async_fire(
+            LIVE_UPDATE_EVENT,
+            {
+                "collection": collection,
+                "editors": result["editors"],
+                "operation": "presence",
+                "record_id": record_id,
+            },
+        )
+        return result
+
+    async def async_end_edit_session(
+        self, collection: str, record_id: str, session_id: str, user_id: str
+    ) -> bool:
+        """End an edit-presence session."""
+        ended = await self.hass.async_add_executor_job(
+            self.database.end_edit_session, session_id, user_id
+        )
+        editors = await self.hass.async_add_executor_job(
+            self.database.active_edit_sessions, collection, record_id
+        )
+        self.hass.bus.async_fire(
+            LIVE_UPDATE_EVENT,
+            {
+                "collection": collection,
+                "editors": editors,
+                "operation": "presence",
+                "record_id": record_id,
+            },
+        )
+        return ended
+
+    async def async_events_since(self, after: int, limit: int) -> dict[str, Any]:
+        """Return persisted changes for reconnecting clients."""
+        return await self.hass.async_add_executor_job(
+            self.database.events_since, after, limit
+        )
+
+    async def async_audit_entries(self, limit: int, offset: int) -> dict[str, Any]:
+        """Return revision audit metadata."""
+        return await self.hass.async_add_executor_job(
+            self.database.audit_entries, limit, offset
+        )
 
     async def async_upsert_topic(self, raw: dict[str, Any]) -> dict[str, Any]:
         """Create or update a topic."""
@@ -375,19 +636,10 @@ class StructuralOfficeManager:
 
     def system_data(self) -> dict[str, Any]:
         """Return the deliberately small Home Assistant administration view."""
-        today = dt_util.now().date()
-        invoices = [invoice_for_frontend(item, today) for item in self.data["invoices"].values()]
         return {
             "backups": list(self.backups),
             "database": dict(self.database_stats),
-            "invoice_status": {
-                "cancelled": sum(item["status"] == "cancelled" for item in invoices),
-                "due_today": sum(item["due_state"] == "due_today" for item in invoices),
-                "open": sum(item["status"] == "open" for item in invoices),
-                "overdue": sum(item["due_state"] == "overdue" for item in invoices),
-                "paid": sum(item["status"] == "paid" for item in invoices),
-            },
-            "version": "0.4.0-alpha",
+            "version": "0.5.0-alpha",
         }
 
     async def async_set_occurrence_status(self, item_id: str, status: str) -> dict[str, Any]:

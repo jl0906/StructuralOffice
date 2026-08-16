@@ -26,11 +26,12 @@ DEFAULT_COMPANY_EMAIL = ""
 
 STORAGE_VERSION = 1
 STORAGE_KEY_PREFIX = "structuraloffice"
-DATABASE_SCHEMA_VERSION = 1
+DATABASE_SCHEMA_VERSION = 2
 DATABASE_DIRECTORY = "structuraloffice"
 DATABASE_FILENAME = "structuraloffice.db"
 BACKUP_DIRECTORY = "backups"
 UPDATE_EVENT = "structuraloffice_updated"
+LIVE_UPDATE_EVENT = "structuraloffice_live_update"
 SCHEDULER_INTERVAL = timedelta(minutes=1)
 
 PANEL_URL = "structuraloffice"

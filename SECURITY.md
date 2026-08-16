@@ -21,3 +21,8 @@ and managed copies in `/config/structuraloffice/backups`. Protect both locations
 the same care as the Home Assistant configuration directory. The versioned REST API
 requires Home Assistant authentication and applies StructuralOffice roles. Never embed
 a long-lived access token in source code, logs, support archives, or public reports.
+
+Live change notifications deliberately contain record identifiers, revision numbers,
+operations, and changed field names only. Business payloads remain behind authenticated
+REST endpoints. Edit-presence sessions expire automatically and are advisory; revision
+checks and SQLite transactions enforce data integrity.

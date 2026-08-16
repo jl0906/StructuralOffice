@@ -149,7 +149,9 @@ ws_delete_invoice = _write_command(
 @websocket_api.websocket_command(
     {vol.Required("type"): f"{DOMAIN}/set_occurrence_status",
      vol.Required("occurrence_id"): str,
-     vol.Required("status"): vol.In(["open", "completed", "skipped"])}
+     vol.Required("status"): vol.In(
+         ["open", "in_progress", "completed", "skipped", "cancelled", "auto_completed"]
+     )}
 )
 async def ws_set_occurrence_status(hass, connection, msg) -> None:
     try:

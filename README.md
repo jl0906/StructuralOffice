@@ -5,14 +5,10 @@ invoice due-date monitoring. The operational desktop interface is being moved to
 separate Windows application. Home Assistant now provides database health statistics
 and managed backup controls only.
 
-The initial native Windows client is available under `windows/`. It opens as a
-self-contained desktop application and verifies Home Assistant connectivity,
-authentication, and the installed StructuralOffice integration. Its backend boundary
-is intentionally prepared for a future standalone mode.
+## Version 0.6.0-alpha
 
-## Version 0.5.0-alpha
-
-This release extends the backend boundary with safe live editing for the Windows client:
+This release prepares the backend database and API for recurring operational work and
+grouped accounting follow-up tasks in the future Windows client:
 
 - Dedicated, versioned SQLite database at
   `/config/structuraloffice/structuraloffice.db`
@@ -30,7 +26,7 @@ This release extends the backend boundary with safe live editing for the Windows
   numbers, explicit selections, or an inclusive invoice-number range
 - Consistent SQLite backup creation, download, integrity validation, restoration, and
   deletion from the Home Assistant panel
-- Database-size, record-count, backup-count, and import-count sensors
+- Database-size, record-count, backup-count, and schema-version sensors
 - Revisioned live records for contacts, topics, routines, occurrences, and invoices
 - Field-level updates with optimistic concurrency control
 - Automatic merging when concurrent clients changed different fields
@@ -40,11 +36,27 @@ This release extends the backend boundary with safe live editing for the Windows
 - Persistent event cursors for catching up after a lost connection
 - Audit metadata for every live create, update, merge, and archive operation
 - REST role administration for the future Windows client
-- Database schema migration from version 1 to version 2
+- Normalized workflow topics, ordered topic steps, recurrence rules, routine/topic
+  assignments, reminders, materialized tasks, and checklist snapshots
+- Monthly and yearly invalid-date handling plus optional previous- or next-business-day
+  adjustment, including routines such as paying VAT on the eighth of every month
+- A rolling task-materialization window that preserves task history independently of
+  later topic changes
+- Configurable accounting follow-up rules for payment reminders and three dunning stages
+- Exactly one automatic follow-up task per rule, invoice due date, and currency, linked
+  to the precise set of unpaid invoices
+- Automatic completion of grouped accounting tasks after all linked invoices are paid,
+  cancelled, archived, or otherwise no longer open
+- Stable row fingerprints and import counters for detecting already imported CSV rows
+- No-op handling when the exact same CSV source is applied again
+- Document generation from the exact invoice membership of a grouped accounting task,
+  only after an explicit request
+- Database schema migration from versions 1 and 2 to version 3
 
-StructuralOffice never creates payment reminders or dunning notices automatically.
-The backend only calculates invoice due states. A document is generated only after an
-authorized user explicitly requests it, and it must be reviewed before sending.
+StructuralOffice automatically creates tasks when receivables remain unpaid after their
+configured due dates. It never creates or sends payment-reminder or dunning documents
+automatically. A document is generated only after an authorized user explicitly requests
+it, and it must be reviewed before sending.
 
 ## Installation with HACS
 
@@ -83,6 +95,11 @@ paid. When enabled and populated, `Abbuchungstag SEPA` is the due date; otherwis
 due date is the invoice date plus the configured payment term. Changing the default
 does not rewrite invoices already imported.
 
+Every source row receives a stable content fingerprint. Preview responses report known
+and new rows, unchanged normalized invoices are not rewritten, and applying the exact
+same source file again returns a successful no-op result. Import batches retain the
+fingerprints needed to detect overlap with later exports.
+
 ## REST API for the Windows client
 
 The API uses Home Assistant authentication. Clients send a valid Home Assistant bearer
@@ -96,6 +113,11 @@ in [API.md](API.md).
 | --- | --- | --- |
 | `GET` | `/api/structuraloffice/v1/status` | Backend and database status |
 | `GET` | `/api/structuraloffice/v1/invoices` | Normalized invoices; supports `status` and `due_state` filters |
+| `GET` | `/api/structuraloffice/v1/tasks` | Materialized recurring and accounting tasks |
+| `GET` | `/api/structuraloffice/v1/accounting/tasks` | Grouped accounting follow-up tasks |
+| `GET` | `/api/structuraloffice/v1/accounting/tasks/{id}/invoices` | Exact invoice membership of one grouped task |
+| `GET` | `/api/structuraloffice/v1/accounting/rules` | Configurable follow-up task rules |
+| `PATCH` | `/api/structuraloffice/v1/accounting/rules/{id}` | Revision-protected rule update |
 | `GET/POST` | `/api/structuraloffice/v1/live/{collection}` | Page or create live records |
 | `GET/PATCH/DELETE` | `/api/structuraloffice/v1/live/{collection}/{id}` | Read, update, or archive a revisioned record |
 | `GET/POST/DELETE` | `/api/structuraloffice/v1/editing/{collection}/{id}` | Read, start, refresh, or end edit presence |
@@ -113,7 +135,27 @@ The import request contains `filename`, base64-encoded `content`, and `apply`. U
 
 Document requests specify `document_type` (`payment_reminder`, `dunning_1`,
 `dunning_2`, or `dunning_3`) and either `invoice_numbers` or
-`invoice_number_from`/`invoice_number_to`. Only open receivables are eligible.
+`invoice_number_from`/`invoice_number_to`. A request may instead provide
+`accounting_task_batch_id` to use the exact still-open invoice membership of an
+automatically grouped task. Only open receivables are eligible.
+
+## Recurring and accounting tasks
+
+Topics are reusable task templates with priority, instructions, estimated duration, and
+up to 100 ordered structured steps. Routines assign one or more topics to daily, weekly,
+monthly, yearly, or explicit-date schedules. They also store due time, timezone, start
+and end dates, reminder offsets, catch-up policy, invalid-month-day behavior, and an
+optional business-day adjustment.
+
+The server materializes concrete routine tasks from these definitions. Topic and step
+content is snapshotted into each task so historical tasks remain understandable after a
+template is edited.
+
+Accounting rules are evaluated on the server. Each enabled stage defines the number of
+days after the invoice due date, evaluation time, minimum open count, notification
+choice, and automatic completion behavior. Matching receivables are grouped by original
+due date and currency. For example, if 40 invoices share a due date and ten remain open,
+the server creates one task linked to those ten invoice IDs, not ten separate tasks.
 
 ## Live editing contract
 

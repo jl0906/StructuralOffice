@@ -38,6 +38,14 @@ def source_checksum(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def _row_fingerprint(row: dict[str, str]) -> str:
+    """Return a stable fingerprint for one exported booking snapshot."""
+    canonical = "\x1f".join(
+        f"{key}={str(row.get(key) or '').strip()}" for key in sorted(row)
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _decode(content: bytes) -> str:
     for encoding in ("utf-8-sig", "cp1252"):
         try:
@@ -100,6 +108,7 @@ def parse_invoice_list_csv(
         )
 
     groups: dict[str, list[tuple[int, dict[str, str]]]] = defaultdict(list)
+    row_fingerprints: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     for row_number, row in enumerate(reader, start=2):
         invoice_number = str(row.get("Rechnungsnummer") or "").strip()
@@ -108,6 +117,13 @@ def parse_invoice_list_csv(
                 errors.append({"row": row_number, "message": "Invoice number is missing"})
             continue
         groups[invoice_number].append((row_number, row))
+        row_fingerprints.append(
+            {
+                "fingerprint": _row_fingerprint(row),
+                "invoice_number": invoice_number,
+                "row_number": row_number,
+            }
+        )
 
     records: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -181,6 +197,7 @@ def parse_invoice_list_csv(
         "checksum": source_checksum(content),
         "errors": errors,
         "records": sorted(records, key=lambda item: item["invoice_number"]),
+        "row_fingerprints": row_fingerprints,
         "source_rows": sum(len(rows) for rows in groups.values()),
         "warnings": warnings,
     }

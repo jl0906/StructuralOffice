@@ -328,6 +328,104 @@ class StructuralOfficeRolesView(HomeAssistantView):
             return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
 
 
+class StructuralOfficeTasksView(HomeAssistantView):
+    """Return materialized routine and accounting tasks."""
+
+    url = f"{API_PREFIX}/tasks"
+    name = f"api:{DOMAIN}:v1:tasks"
+
+    async def get(self, request: web.Request) -> web.Response:
+        _role(request)
+        try:
+            return self.json(
+                await _manager(request).async_list_materialized_tasks(
+                    status=request.query.get("status"),
+                    source_type=request.query.get("source_type"),
+                    limit=_integer(request.query.get("limit"), 100, "limit"),
+                    offset=_integer(request.query.get("offset"), 0, "offset"),
+                )
+            )
+        except StructuralOfficeValidationError as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+
+class StructuralOfficeAccountingTasksView(HomeAssistantView):
+    """Return grouped tasks created from unpaid invoices."""
+
+    url = f"{API_PREFIX}/accounting/tasks"
+    name = f"api:{DOMAIN}:v1:accounting-tasks"
+
+    async def get(self, request: web.Request) -> web.Response:
+        _role(request)
+        try:
+            return self.json(
+                await _manager(request).async_list_accounting_batches(
+                    status=request.query.get("status"),
+                    limit=_integer(request.query.get("limit"), 100, "limit"),
+                    offset=_integer(request.query.get("offset"), 0, "offset"),
+                )
+            )
+        except StructuralOfficeValidationError as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+
+class StructuralOfficeAccountingTaskInvoicesView(HomeAssistantView):
+    """Return exact invoice membership for one grouped accounting task."""
+
+    url = f"{API_PREFIX}/accounting/tasks/{{batch_id}}/invoices"
+    name = f"api:{DOMAIN}:v1:accounting-task-invoices"
+
+    async def get(self, request: web.Request, batch_id: str) -> web.Response:
+        _role(request)
+        return self.json(
+            {
+                "batch_id": batch_id,
+                "invoices": await _manager(request).async_accounting_batch_invoices(batch_id),
+            }
+        )
+
+
+class StructuralOfficeAccountingRulesView(HomeAssistantView):
+    """Return accounting task-generation rules."""
+
+    url = f"{API_PREFIX}/accounting/rules"
+    name = f"api:{DOMAIN}:v1:accounting-rules"
+
+    async def get(self, request: web.Request) -> web.Response:
+        _role(request)
+        return self.json({"rules": await _manager(request).async_accounting_rules()})
+
+
+class StructuralOfficeAccountingRuleView(HomeAssistantView):
+    """Update one accounting task-generation rule."""
+
+    url = f"{API_PREFIX}/accounting/rules/{{rule_id}}"
+    name = f"api:{DOMAIN}:v1:accounting-rule"
+
+    async def patch(self, request: web.Request, rule_id: str) -> web.Response:
+        _role(request, write=True)
+        try:
+            payload = await request.json()
+            if "expected_revision" not in payload:
+                raise StructuralOfficeValidationError("expected_revision is required")
+            user_id, user_name = _identity(request)
+            result = await _manager(request).async_update_accounting_rule(
+                rule_id,
+                payload.get("data", {}),
+                int(payload["expected_revision"]),
+                user_id,
+                user_name,
+            )
+            return self.json(result)
+        except StructuralOfficeConflictError as err:
+            return self.json(
+                {"code": "revision_conflict", "current": err.current, "error": str(err)},
+                status_code=409,
+            )
+        except (StructuralOfficeValidationError, TypeError, ValueError) as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+
 class StructuralOfficeInvoiceImportView(HomeAssistantView):
     """Preview or apply an invoice-list CSV upload."""
 
@@ -360,7 +458,20 @@ class StructuralOfficeDocumentsView(HomeAssistantView):
         try:
             payload = await request.json()
             document_type = str(payload.get("document_type", ""))
-            invoices = self._select(_manager(request), payload)
+            manager = _manager(request)
+            batch_id = str(payload.get("accounting_task_batch_id") or "")
+            if batch_id:
+                members = await manager.async_accounting_batch_invoices(batch_id)
+                eligible_ids = {
+                    item["invoice_id"] for item in members if item["status"] == "open"
+                }
+                invoices = [
+                    item
+                    for item in manager.data["invoices"].values()
+                    if item["id"] in eligible_ids
+                ]
+            else:
+                invoices = self._select(manager, payload)
             if not invoices:
                 raise StructuralOfficeValidationError("No matching invoices were found")
             invalid = [
@@ -373,7 +484,6 @@ class StructuralOfficeDocumentsView(HomeAssistantView):
                 raise StructuralOfficeValidationError(
                     "Documents require open receivables: " + ", ".join(invalid[:10])
                 )
-            manager = _manager(request)
             company = {
                 "address": manager.options[CONF_COMPANY_ADDRESS],
                 "email": manager.options[CONF_COMPANY_EMAIL],
@@ -484,6 +594,11 @@ def async_register(hass: HomeAssistant) -> None:
         StructuralOfficeEventsView,
         StructuralOfficeAuditView,
         StructuralOfficeRolesView,
+        StructuralOfficeTasksView,
+        StructuralOfficeAccountingTasksView,
+        StructuralOfficeAccountingTaskInvoicesView,
+        StructuralOfficeAccountingRulesView,
+        StructuralOfficeAccountingRuleView,
         StructuralOfficeInvoiceImportView,
         StructuralOfficeDocumentsView,
         StructuralOfficeBackupsView,

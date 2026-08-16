@@ -15,7 +15,7 @@ SENSORS = (
     ("database_size", "Database Size", "mdi:database", "database_bytes", "B"),
     ("database_records", "Database Records", "mdi:table-row", "record_count", "records"),
     ("database_backups", "Database Backups", "mdi:database-check", "backup_count", "backups"),
-    ("csv_imports", "CSV Imports", "mdi:file-delimited", "import_count", "imports"),
+    ("database_schema", "Database Schema", "mdi:database-cog", "schema_version", "version"),
 )
 
 

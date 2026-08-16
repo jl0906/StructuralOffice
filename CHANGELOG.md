@@ -5,18 +5,53 @@ All notable changes to StructuralOffice are documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.6.0-alpha] - 2026-08-16
+
 ### Added
 
-- Native Windows desktop foundation with Home Assistant connectivity, authentication,
-  and StructuralOffice integration checks.
-- Self-contained per-user Windows package with Start-menu shortcuts and Installed Apps
-  registration.
-- Backend abstraction and standalone placeholder for a future local-only release.
+- Database schema version 3 with normalized workflow topics, ordered topic steps,
+  routines, recurrence rules, routine/topic assignments, reminders, task occurrences,
+  and task checklist snapshots.
+- Persistent materialization of recurring tasks across a rolling history and planning
+  window.
+- Topic priority, instructions, estimated duration, enabled state, and structured step
+  metadata for the future Windows client.
+- Routine timezone, end date, catch-up policy, invalid-month-day handling, and previous-
+  or next-business-day adjustment.
+- Normalized accounting invoices, configurable follow-up rules, grouped accounting task
+  batches, and exact task-to-invoice memberships.
+- Default server rules for payment-reminder and three dunning task stages.
+- Automatic creation of one accounting follow-up task per stage, original due date, and
+  currency when matching receivables remain unpaid.
+- Automatic completion when all invoices linked to a grouped task are no longer open.
+- Stable CSV row fingerprints and import-batch counters for known and new booking rows.
+- REST endpoints for materialized tasks, accounting batches, exact invoice membership,
+  and revision-protected accounting-rule updates.
+- Explicit document generation from an accounting task's exact open invoice membership.
+- Migration and behavior tests for schema version 3, recurrence edge cases, grouped
+  accounting tasks, automatic completion, and row-level import deduplication.
 
 ### Changed
 
 - Removed all invoice statistics from the Home Assistant panel. Invoice information
   remains available only through the authenticated Windows-client API.
+- Removed the CSV-import counter from Home Assistant statistics and sensors; the panel
+  now displays only database size, backup count, schema version, and integrity.
+- Applying an identical CSV source a second time returns a successful no-op result.
+- Unchanged invoice records are skipped during imports instead of being rewritten.
+- The frontend cache and integration version are now `0.6.0-alpha`.
+- The database schema is now version 3 and migrates existing version-1 and version-2
+  installations in place.
+
+### Security
+
+- Grouped documents use stored invoice IDs rather than inferring membership from an
+  invoice-number range.
+
+### Important behavior
+
+- StructuralOffice creates follow-up tasks automatically, but never creates or sends
+  payment-reminder or dunning documents without an explicit authorized request.
 
 ## [0.5.0-alpha] - 2026-08-16
 
@@ -154,7 +189,8 @@ All notable changes to StructuralOffice are documented in this file. The format 
 - Push notifications to selected `notify` entities
 - Task states, sensors, calendar support, and local storage
 
-[Unreleased]: https://github.com/jl0906/StructuralOffice/compare/v0.5.0-alpha...HEAD
+[Unreleased]: https://github.com/jl0906/StructuralOffice/compare/v0.6.0-alpha...HEAD
+[0.6.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.5.0-alpha...v0.6.0-alpha
 [0.5.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.4.0-alpha...v0.5.0-alpha
 [0.4.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.3.0-alpha...v0.4.0-alpha
 [0.3.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.2.0...v0.3.0-alpha

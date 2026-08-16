@@ -84,6 +84,7 @@ class StructuralOfficeManager:
         self.backups: list[dict[str, Any]] = []
         self._listeners: set[Callable[[], None]] = set()
         self._remove_timer: Callable[[], None] | None = None
+        self._last_materialized_date: date | None = None
 
     @staticmethod
     def _empty_data() -> dict[str, Any]:
@@ -117,6 +118,8 @@ class StructuralOfficeManager:
                     )
                     _LOGGER.info("Migrated legacy StructuralOffice storage to SQLite")
         await self._async_refresh_database_stats()
+        await self.async_materialize_workflow_tasks(force=True)
+        await self.async_evaluate_accounting_tasks(force=True)
         self._remove_timer = async_track_time_interval(
             self.hass, self._async_timer, SCHEDULER_INTERVAL
         )
@@ -130,6 +133,8 @@ class StructuralOfficeManager:
         await self.hass.async_add_executor_job(self.database.save, self.data)
 
     async def _async_timer(self, _now: datetime) -> None:
+        await self.async_materialize_workflow_tasks()
+        await self.async_evaluate_accounting_tasks()
         await self.async_process_reminders()
         for listener in list(self._listeners):
             listener()
@@ -355,6 +360,10 @@ class StructuralOfficeManager:
             set(raw),
         )
         self.data[collection][record_id] = result["data"]
+        if collection in {"topics", "routines"}:
+            await self.async_materialize_workflow_tasks(force=True)
+        elif collection == "invoices":
+            await self.async_evaluate_accounting_tasks(force=True)
         await self._async_refresh_database_stats()
         self._fire_live_event(result)
         return result
@@ -468,6 +477,70 @@ class StructuralOfficeManager:
             self.database.audit_entries, limit, offset
         )
 
+    async def async_list_materialized_tasks(
+        self,
+        *,
+        status: str | None,
+        source_type: str | None,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        """Return persisted routine and accounting tasks."""
+        return await self.hass.async_add_executor_job(
+            partial(
+                self.database.list_materialized_tasks,
+                status=status,
+                source_type=source_type,
+                limit=limit,
+                offset=offset,
+            )
+        )
+
+    async def async_list_accounting_batches(
+        self, *, status: str | None, limit: int, offset: int
+    ) -> dict[str, Any]:
+        """Return grouped accounting task summaries."""
+        return await self.hass.async_add_executor_job(
+            partial(
+                self.database.list_accounting_task_batches,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+        )
+
+    async def async_accounting_batch_invoices(
+        self, batch_id: str
+    ) -> list[dict[str, Any]]:
+        """Return exact invoice membership for an accounting task."""
+        return await self.hass.async_add_executor_job(
+            self.database.accounting_task_invoice_ids, batch_id
+        )
+
+    async def async_accounting_rules(self) -> list[dict[str, Any]]:
+        """Return grouped accounting task-generation rules."""
+        return await self.hass.async_add_executor_job(self.database.list_accounting_rules)
+
+    async def async_update_accounting_rule(
+        self,
+        rule_id: str,
+        changes: dict[str, Any],
+        expected_revision: int,
+        user_id: str,
+        user_name: str,
+    ) -> dict[str, Any]:
+        """Update one task-generation rule and immediately re-evaluate invoices."""
+        result = await self.hass.async_add_executor_job(
+            self.database.update_accounting_rule,
+            rule_id,
+            changes,
+            expected_revision,
+            user_id,
+            user_name,
+        )
+        await self.async_evaluate_accounting_tasks(force=True)
+        return result
+
     async def async_upsert_topic(self, raw: dict[str, Any]) -> dict[str, Any]:
         """Create or update a topic."""
         requested_id = str(raw.get("id", ""))
@@ -475,6 +548,7 @@ class StructuralOfficeManager:
         topic = validate_topic(raw, existing_id)
         self.data["topics"][topic["id"]] = topic
         await self._async_save()
+        await self.async_materialize_workflow_tasks(force=True)
         return topic
 
     async def async_delete_topic(self, topic_id: str) -> None:
@@ -500,6 +574,7 @@ class StructuralOfficeManager:
         routine = validate_routine(raw, set(self.data["topics"]), existing_id)
         self.data["routines"][routine["id"]] = routine
         await self._async_save()
+        await self.async_materialize_workflow_tasks(force=True)
         return routine
 
     async def async_delete_routine(self, routine_id: str) -> None:
@@ -526,6 +601,7 @@ class StructuralOfficeManager:
         invoice = validate_invoice(raw, existing_id)
         self.data["invoices"][invoice["id"]] = invoice
         await self._async_save()
+        await self.async_evaluate_accounting_tasks(force=True)
         return invoice_for_frontend(invoice, dt_util.now().date())
 
     async def async_delete_invoice(self, invoice_id: str) -> None:
@@ -548,6 +624,7 @@ class StructuralOfficeManager:
         seen_ids: set[str] = set()
         created = 0
         updated = 0
+        unchanged = 0
         for raw in records:
             requested_id = str(raw.get("id", ""))
             existing_id = requested_id if requested_id in self.data["invoices"] else None
@@ -556,14 +633,24 @@ class StructuralOfficeManager:
                 raise StructuralOfficeValidationError("Import contains duplicate IDs")
             seen_ids.add(invoice["id"])
             if existing_id:
-                updated += 1
+                existing = self.data["invoices"][existing_id]
+                comparable = {key: value for key, value in invoice.items() if key != "updated_at"}
+                existing_comparable = {
+                    key: value for key, value in existing.items() if key != "updated_at"
+                }
+                if comparable == existing_comparable:
+                    invoice = existing
+                    unchanged += 1
+                else:
+                    updated += 1
             else:
                 created += 1
             normalized.append(invoice)
         for invoice in normalized:
             self.data["invoices"][invoice["id"]] = invoice
         await self._async_save()
-        return {"created": created, "updated": updated}
+        await self.async_evaluate_accounting_tasks(force=True)
+        return {"created": created, "unchanged": unchanged, "updated": updated}
 
     async def async_import_invoice_csv(
         self,
@@ -583,16 +670,43 @@ class StructuralOfficeManager:
         )
         existing = self.data["invoices"]
         parsed["created"] = sum(item["id"] not in existing for item in parsed["records"])
-        parsed["updated"] = sum(item["id"] in existing for item in parsed["records"])
+        parsed["unchanged"] = sum(
+            item["id"] in existing
+            and {key: value for key, value in item.items() if key != "updated_at"}
+            == {
+                key: value
+                for key, value in existing[item["id"]].items()
+                if key != "updated_at"
+            }
+            for item in parsed["records"]
+        )
+        parsed["updated"] = len(parsed["records"]) - parsed["created"] - parsed["unchanged"]
         parsed["already_imported"] = await self.hass.async_add_executor_job(
             self.database.has_import_checksum, parsed["checksum"]
         )
+        fingerprints = [item["fingerprint"] for item in parsed["row_fingerprints"]]
+        known_fingerprints = await self.hass.async_add_executor_job(
+            self.database.known_import_row_fingerprints, fingerprints
+        )
+        parsed["known_rows"] = len(known_fingerprints)
+        parsed["new_rows"] = len(fingerprints) - len(known_fingerprints)
         if not apply:
             return parsed
         if parsed["errors"]:
             raise StructuralOfficeValidationError("CSV import contains validation errors")
         if parsed["already_imported"]:
-            raise StructuralOfficeValidationError("This exact CSV file was already imported")
+            return {
+                "already_imported": True,
+                "cancelled": parsed["cancelled"],
+                "checksum": parsed["checksum"],
+                "created": 0,
+                "known_rows": parsed["known_rows"],
+                "new_rows": 0,
+                "record_count": len(parsed["records"]),
+                "source_name": Path(source_name).name[:255] or "invoice-list.csv",
+                "unchanged": len(parsed["records"]),
+                "updated": 0,
+            }
 
         result = await self.async_import_invoices(parsed["records"])
         imported_at = dt_util.utcnow().isoformat()
@@ -603,14 +717,75 @@ class StructuralOfficeManager:
             "import_id": f"csv-{parsed['checksum'][:24]}",
             "imported_at": imported_at,
             "record_count": len(parsed["records"]),
+            "known_rows": parsed["known_rows"],
+            "new_rows": parsed["new_rows"],
             "source_name": Path(source_name).name[:255] or "invoice-list.csv",
+            "unchanged": result["unchanged"],
             "updated": result["updated"],
         }
         await self.hass.async_add_executor_job(
-            self.database.add_import_batch, batch, content
+            self.database.add_import_batch, batch, content, parsed["row_fingerprints"]
         )
         await self._async_refresh_database_stats()
         return batch
+
+    async def async_materialize_workflow_tasks(self, *, force: bool = False) -> dict[str, int]:
+        """Persist concrete routine tasks for history and future Windows clients."""
+        today = dt_util.now().date()
+        if not force and self._last_materialized_date == today:
+            return {"created": 0, "updated": 0}
+        occurrences = self.build_occurrences(
+            today - timedelta(days=365), today + timedelta(days=730)
+        )
+        result = await self.hass.async_add_executor_job(
+            self.database.materialize_task_occurrences,
+            occurrences,
+            dt_util.utcnow().isoformat(),
+        )
+        self._last_materialized_date = today
+        await self._async_refresh_database_stats()
+        return result
+
+    async def async_evaluate_accounting_tasks(
+        self, now: datetime | None = None, *, force: bool = False
+    ) -> dict[str, Any]:
+        """Create or refresh grouped tasks for due, unpaid invoices."""
+        local_now = dt_util.as_local(now or dt_util.utcnow())
+        result = await self.hass.async_add_executor_job(
+            self.database.evaluate_accounting_tasks,
+            local_now.date().isoformat(),
+            dt_util.utcnow().isoformat(),
+            local_now.strftime("%H:%M"),
+            force,
+        )
+        if result["created"] or result["updated"] or result["completed"]:
+            self.hass.bus.async_fire(
+                LIVE_UPDATE_EVENT,
+                {
+                    "operation": "accounting_tasks_refreshed",
+                    "summary": result,
+                },
+            )
+            self._notify_changed()
+        if result["created"] and self.options[CONF_NOTIFY_TARGETS]:
+            await self.hass.services.async_call(
+                "notify",
+                "send_message",
+                {
+                    "title": "StructuralOffice: Accounting tasks",
+                    "message": (
+                        f"{result['created']} grouped task(s) were created for unpaid "
+                        "invoices. Review them in the StructuralOffice Windows client."
+                    ),
+                    "data": {
+                        "tag": f"structuraloffice-accounting-{result['evaluation_date']}"
+                    },
+                },
+                target={"entity_id": self.options[CONF_NOTIFY_TARGETS]},
+                blocking=True,
+            )
+        await self._async_refresh_database_stats()
+        return result
 
     async def async_create_backup(self) -> dict[str, Any]:
         """Create a consistent database backup."""
@@ -639,7 +814,7 @@ class StructuralOfficeManager:
         return {
             "backups": list(self.backups),
             "database": dict(self.database_stats),
-            "version": "0.5.0-alpha",
+            "version": "0.6.0-alpha",
         }
 
     async def async_set_occurrence_status(self, item_id: str, status: str) -> dict[str, Any]:
@@ -691,6 +866,8 @@ class StructuralOfficeManager:
                             "description": topic["description"],
                             "category": topic["category"],
                             "checklist": topic["checklist"],
+                            "steps": topic.get("steps", []),
+                            "priority": topic.get("priority", "normal"),
                             "due_date": due.isoformat(),
                             "due_time": routine["due_time"],
                             "status": stored.get("status", STATUS_OPEN),

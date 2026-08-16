@@ -87,8 +87,8 @@ class StructuralOfficePanel extends HTMLElement {
     const backups = this.data.backups || [];
     return `<section><h2>Database</h2><div class="grid">
       ${this.stat("Database size", this.bytes(db.database_bytes), "mdi:database")}
-      ${this.stat("Stored records", db.record_count || 0, "mdi:table-row")}
-      ${this.stat("CSV imports", db.import_count || 0, "mdi:file-delimited")}
+      ${this.stat("Backups", db.backup_count || 0, "mdi:database-check")}
+      ${this.stat("Schema version", db.schema_version || 0, "mdi:database-cog")}
       ${this.stat("Integrity", db.integrity || "unknown", db.integrity === "ok" ? "mdi:check-decagram" : "mdi:alert")}
     </div></section><section class="panel"><div class="head"><div><h2>Database backups</h2><div class="sub">Backups are stored locally inside the StructuralOffice data directory.</div></div><button data-create ${this.busy ? "disabled" : ""}><ha-icon icon="mdi:database-plus"></ha-icon> Create backup</button></div>
       <div class="table-wrap">${backups.length ? `<table><thead><tr><th>Created</th><th>Size</th><th>Filename</th><th></th></tr></thead><tbody>${backups.map((backup) => `<tr><td>${this.escape(this.date(backup.created_at))}</td><td>${this.bytes(backup.size_bytes)}</td><td>${this.escape(backup.filename)}</td><td><div class="actions"><button class="secondary" data-download="${this.escape(backup.filename)}">Download</button><button class="secondary" data-restore="${this.escape(backup.filename)}">Restore</button><button class="danger" data-delete="${this.escape(backup.filename)}">Delete</button></div></td></tr>`).join("")}</tbody></table>` : `<div class="empty">No backups have been created.</div>`}</div></section>`;

@@ -1,7 +1,7 @@
 # StructuralOffice API
 
 This document describes the alpha API contract implemented by StructuralOffice
-`0.5.0-alpha`. The contract may change before `1.0.0`.
+`0.6.0-alpha`. The contract may change before `1.0.0`.
 
 ## Connection and authorization
 
@@ -165,6 +165,80 @@ POST /api/structuraloffice/v1/documents
 ```
 
 The server never generates or sends payment reminders or dunning notices automatically.
+
+Applying a source whose complete SHA-256 checksum is already present succeeds as a
+no-op. Preview and apply responses include `known_rows`, `new_rows`, and `unchanged`.
+Row fingerprints also detect bookings already seen in a different export.
+
+## Materialized workflow tasks
+
+List persisted routine and accounting tasks:
+
+```http
+GET /api/structuraloffice/v1/tasks?status=open&source_type=routine&limit=100&offset=0
+```
+
+`source_type` is `routine` for recurring work and `accounting_due_batch` for automatic
+invoice follow-up tasks. Routine tasks snapshot their topic metadata and checklist when
+materialized. Recurrence definitions support one-time, daily, weekly, monthly, and yearly
+schedules, multiple weekdays or month days, explicit dates, intervals, start and end
+dates, reminder offsets, catch-up policy, invalid-date handling, and business-day
+adjustment.
+
+## Grouped accounting tasks
+
+```http
+GET /api/structuraloffice/v1/accounting/tasks?status=open
+GET /api/structuraloffice/v1/accounting/tasks/<batch-id>/invoices
+```
+
+The first endpoint returns task summaries. The second returns exact invoice IDs and the
+open/resolved state of every member. The server creates at most one batch per configured
+rule, original invoice due date, and currency. Membership contains only receivables that
+are still open when the batch is evaluated. Empty batches are automatically completed
+when enabled by the rule.
+
+Use the exact membership for explicitly requested document generation:
+
+```http
+POST /api/structuraloffice/v1/documents
+
+{
+  "document_type": "payment_reminder",
+  "accounting_task_batch_id": "<batch-id>"
+}
+```
+
+This creates files only for currently open members. It does not send them.
+
+## Accounting task rules
+
+```http
+GET /api/structuraloffice/v1/accounting/rules
+```
+
+Default rules create a payment-reminder task one day after the due date and dunning
+tasks after 14, 30, and 60 days. An editor or administrator can update a rule with
+optimistic revision protection:
+
+```http
+PATCH /api/structuraloffice/v1/accounting/rules/payment-reminder
+
+{
+  "expected_revision": 1,
+  "data": {
+    "days_after_due": 3,
+    "evaluation_time": "09:00",
+    "minimum_open_invoices": 1,
+    "notify_enabled": true,
+    "enabled": true
+  }
+}
+```
+
+Mutable fields are `days_after_due`, `evaluation_time`, `minimum_open_invoices`,
+`maximum_invoices_per_batch`, `auto_complete_empty_batches`, `notify_enabled`, and
+`enabled`.
 
 ## Administrative endpoints
 

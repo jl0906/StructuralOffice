@@ -6,7 +6,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -88,6 +88,19 @@ class StructuralOfficeDatabase:
                 "UPDATE records SET created_at = COALESCE(created_at, updated_at, ?)",
                 (now,),
             )
+            import_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(import_batches)")
+            }
+            if "known_row_count" not in import_columns:
+                connection.execute(
+                    "ALTER TABLE import_batches ADD COLUMN known_row_count "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+            if "new_row_count" not in import_columns:
+                connection.execute(
+                    "ALTER TABLE import_batches ADD COLUMN new_row_count "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS change_events (
@@ -129,6 +142,190 @@ class StructuralOfficeDatabase:
                 );
                 """
             )
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS workflow_topics (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    priority TEXT NOT NULL,
+                    estimated_minutes INTEGER NOT NULL,
+                    instructions TEXT NOT NULL,
+                    enabled INTEGER NOT NULL,
+                    revision INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    archived_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS workflow_topic_steps (
+                    id TEXT PRIMARY KEY,
+                    topic_id TEXT NOT NULL REFERENCES workflow_topics(id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    required INTEGER NOT NULL DEFAULT 1,
+                    estimated_minutes INTEGER NOT NULL DEFAULT 0,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    UNIQUE(topic_id, position)
+                );
+                CREATE TABLE IF NOT EXISTS workflow_routines (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    timezone TEXT NOT NULL,
+                    due_time TEXT NOT NULL,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT,
+                    enabled INTEGER NOT NULL,
+                    catch_up_policy TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    archived_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS workflow_recurrence_rules (
+                    routine_id TEXT PRIMARY KEY REFERENCES workflow_routines(id) ON DELETE CASCADE,
+                    frequency TEXT NOT NULL,
+                    interval_value INTEGER NOT NULL,
+                    weekdays TEXT NOT NULL,
+                    month_days TEXT NOT NULL,
+                    months TEXT NOT NULL,
+                    explicit_dates TEXT NOT NULL,
+                    business_day_rule TEXT NOT NULL,
+                    invalid_day_rule TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS workflow_routine_topics (
+                    routine_id TEXT NOT NULL REFERENCES workflow_routines(id) ON DELETE CASCADE,
+                    topic_id TEXT NOT NULL REFERENCES workflow_topics(id),
+                    position INTEGER NOT NULL,
+                    required INTEGER NOT NULL DEFAULT 1,
+                    due_offset_days INTEGER NOT NULL DEFAULT 0,
+                    due_time_override TEXT,
+                    PRIMARY KEY(routine_id, topic_id)
+                );
+                CREATE TABLE IF NOT EXISTS workflow_reminders (
+                    id TEXT PRIMARY KEY,
+                    routine_id TEXT NOT NULL REFERENCES workflow_routines(id) ON DELETE CASCADE,
+                    offset_days INTEGER NOT NULL,
+                    reminder_time TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    UNIQUE(routine_id, offset_days, reminder_time)
+                );
+                CREATE TABLE IF NOT EXISTS task_occurrences (
+                    id TEXT PRIMARY KEY,
+                    routine_id TEXT REFERENCES workflow_routines(id),
+                    topic_id TEXT REFERENCES workflow_topics(id),
+                    source_type TEXT NOT NULL,
+                    source_id TEXT,
+                    scheduled_date TEXT NOT NULL,
+                    due_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    priority TEXT NOT NULL,
+                    topic_snapshot TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    completed_by TEXT,
+                    completion_note TEXT NOT NULL DEFAULT '',
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    archived_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS task_occurrences_due_idx
+                    ON task_occurrences(status, due_at);
+                CREATE TABLE IF NOT EXISTS task_checklist_items (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL REFERENCES task_occurrences(id) ON DELETE CASCADE,
+                    source_step_id TEXT,
+                    position INTEGER NOT NULL,
+                    title_snapshot TEXT NOT NULL,
+                    required INTEGER NOT NULL,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    completed_at TEXT,
+                    completed_by TEXT,
+                    note TEXT NOT NULL DEFAULT '',
+                    revision INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE TABLE IF NOT EXISTS accounting_invoices (
+                    id TEXT PRIMARY KEY,
+                    invoice_number TEXT NOT NULL,
+                    invoice_date TEXT NOT NULL,
+                    due_date TEXT NOT NULL,
+                    currency TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    gross_cents INTEGER NOT NULL,
+                    outstanding_cents INTEGER NOT NULL,
+                    contact TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    archived_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS accounting_invoices_due_idx
+                    ON accounting_invoices(due_date, status, currency);
+                CREATE TABLE IF NOT EXISTS invoice_import_rows (
+                    row_fingerprint TEXT PRIMARY KEY,
+                    import_id TEXT NOT NULL REFERENCES import_batches(import_id) ON DELETE CASCADE,
+                    invoice_number TEXT NOT NULL,
+                    row_number INTEGER NOT NULL,
+                    imported_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS accounting_escalation_rules (
+                    id TEXT PRIMARY KEY,
+                    task_type TEXT NOT NULL,
+                    escalation_level INTEGER NOT NULL,
+                    days_after_due INTEGER NOT NULL,
+                    evaluation_time TEXT NOT NULL,
+                    group_by TEXT NOT NULL DEFAULT 'due_date',
+                    minimum_open_invoices INTEGER NOT NULL DEFAULT 1,
+                    maximum_invoices_per_batch INTEGER NOT NULL DEFAULT 1000,
+                    auto_complete_empty_batches INTEGER NOT NULL DEFAULT 1,
+                    notify_enabled INTEGER NOT NULL DEFAULT 1,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(task_type, escalation_level)
+                );
+                CREATE TABLE IF NOT EXISTS accounting_task_batches (
+                    id TEXT PRIMARY KEY,
+                    task_type TEXT NOT NULL,
+                    escalation_level INTEGER NOT NULL,
+                    source_due_date TEXT NOT NULL,
+                    currency TEXT NOT NULL,
+                    evaluation_date TEXT NOT NULL,
+                    due_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    invoice_count_initial INTEGER NOT NULL,
+                    invoice_count_open INTEGER NOT NULL,
+                    outstanding_cents INTEGER NOT NULL,
+                    created_automatically INTEGER NOT NULL,
+                    rule_id TEXT REFERENCES accounting_escalation_rules(id),
+                    deduplication_key TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    archived_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS accounting_task_batches_due_idx
+                    ON accounting_task_batches(status, due_at);
+                CREATE TABLE IF NOT EXISTS accounting_task_invoices (
+                    task_id TEXT NOT NULL REFERENCES accounting_task_batches(id) ON DELETE CASCADE,
+                    invoice_id TEXT NOT NULL REFERENCES accounting_invoices(id),
+                    outstanding_cents_at_creation INTEGER NOT NULL,
+                    outstanding_cents_current INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    included_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    resolution_reason TEXT,
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY(task_id, invoice_id)
+                );
+                """
+            )
+            self._insert_default_escalation_rules(connection, now)
+            self._sync_all_projections(connection)
             connection.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
                 (str(DATABASE_SCHEMA_VERSION),),
@@ -139,6 +336,213 @@ class StructuralOfficeDatabase:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
         return connection
+
+    @staticmethod
+    def _insert_default_escalation_rules(
+        connection: sqlite3.Connection, timestamp: str
+    ) -> None:
+        defaults = (
+            ("payment-reminder-default", "payment_reminder", 0, 1),
+            ("dunning-level-1-default", "dunning", 1, 14),
+            ("dunning-level-2-default", "dunning", 2, 30),
+            ("dunning-level-3-default", "dunning", 3, 60),
+        )
+        connection.executemany(
+            "INSERT OR IGNORE INTO accounting_escalation_rules("
+            "id, task_type, escalation_level, days_after_due, evaluation_time, "
+            "group_by, minimum_open_invoices, maximum_invoices_per_batch, "
+            "auto_complete_empty_batches, notify_enabled, enabled, revision, "
+            "created_at, updated_at) VALUES(?, ?, ?, ?, '09:00', 'due_date', "
+            "1, 1000, 1, 1, 1, 1, ?, ?)",
+            ((*item, timestamp, timestamp) for item in defaults),
+        )
+
+    def _sync_all_projections(self, connection: sqlite3.Connection) -> None:
+        """Populate normalized schema-v3 tables from existing alpha records."""
+        rows = connection.execute(
+            "SELECT collection, record_id, payload, revision, updated_at, "
+            "created_at, archived_at FROM records "
+            "WHERE collection IN ('topics', 'routines', 'invoices') "
+            "ORDER BY CASE collection WHEN 'topics' THEN 1 WHEN 'routines' THEN 2 ELSE 3 END"
+        ).fetchall()
+        for row in rows:
+            self._project_record(connection, *row)
+
+    def _project_record(
+        self,
+        connection: sqlite3.Connection,
+        collection: str,
+        record_id: str,
+        encoded_payload: str,
+        revision: int,
+        updated_at: str,
+        created_at: str,
+        archived_at: str | None,
+    ) -> None:
+        """Synchronize one generic alpha record into normalized backend tables."""
+        payload = json.loads(encoded_payload)
+        if collection == "topics":
+            connection.execute(
+                """INSERT INTO workflow_topics(
+                    id, name, description, category, priority, estimated_minutes,
+                    instructions, enabled, revision, created_at, updated_at, archived_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name, description=excluded.description,
+                    category=excluded.category, priority=excluded.priority,
+                    estimated_minutes=excluded.estimated_minutes,
+                    instructions=excluded.instructions, enabled=excluded.enabled,
+                    revision=excluded.revision, updated_at=excluded.updated_at,
+                    archived_at=excluded.archived_at""",
+                (
+                    record_id,
+                    payload.get("name", ""),
+                    payload.get("description", ""),
+                    payload.get("category", ""),
+                    payload.get("priority", "normal"),
+                    int(payload.get("estimated_minutes", 0)),
+                    payload.get("instructions", ""),
+                    int(payload.get("enabled", True)),
+                    revision,
+                    created_at,
+                    updated_at,
+                    archived_at,
+                ),
+            )
+            connection.execute(
+                "DELETE FROM workflow_topic_steps WHERE topic_id = ?", (record_id,)
+            )
+            for position, raw_step in enumerate(
+                payload.get("steps", payload.get("checklist", []))
+            ):
+                step = raw_step if isinstance(raw_step, dict) else {"title": str(raw_step)}
+                connection.execute(
+                    "INSERT INTO workflow_topic_steps(id, topic_id, position, title, "
+                    "required, estimated_minutes, enabled) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        f"{record_id}:{step.get('id') or position}",
+                        record_id,
+                        position,
+                        str(step.get("title", "")),
+                        int(step.get("required", True)),
+                        int(step.get("estimated_minutes", 0)),
+                        int(step.get("enabled", True)),
+                    ),
+                )
+            return
+        if collection == "routines":
+            schedule = payload.get("schedule", {})
+            connection.execute(
+                """INSERT INTO workflow_routines(
+                    id, name, description, timezone, due_time, start_date, end_date,
+                    enabled, catch_up_policy, revision, created_at, updated_at, archived_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name, description=excluded.description,
+                    timezone=excluded.timezone, due_time=excluded.due_time,
+                    start_date=excluded.start_date, end_date=excluded.end_date,
+                    enabled=excluded.enabled, catch_up_policy=excluded.catch_up_policy,
+                    revision=excluded.revision, updated_at=excluded.updated_at,
+                    archived_at=excluded.archived_at""",
+                (
+                    record_id,
+                    payload.get("name", ""),
+                    payload.get("description", ""),
+                    payload.get("timezone", "Europe/Berlin"),
+                    payload.get("due_time", "09:00"),
+                    schedule.get("start_date", created_at[:10]),
+                    payload.get("end_date"),
+                    int(payload.get("enabled", True)),
+                    payload.get("catch_up_policy", "configured_window"),
+                    revision,
+                    created_at,
+                    updated_at,
+                    archived_at,
+                ),
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO workflow_recurrence_rules("
+                "routine_id, frequency, interval_value, weekdays, month_days, months, "
+                "explicit_dates, business_day_rule, invalid_day_rule) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    record_id,
+                    schedule.get("frequency", "monthly"),
+                    int(schedule.get("interval", 1)),
+                    json.dumps(schedule.get("weekdays", [])),
+                    json.dumps(schedule.get("month_days", [])),
+                    json.dumps(schedule.get("months", [])),
+                    json.dumps(schedule.get("dates", [])),
+                    schedule.get("business_day_rule", "none"),
+                    schedule.get("invalid_day_rule", "skip"),
+                ),
+            )
+            connection.execute(
+                "DELETE FROM workflow_routine_topics WHERE routine_id = ?", (record_id,)
+            )
+            for position, topic_id in enumerate(payload.get("topic_ids", [])):
+                if connection.execute(
+                    "SELECT 1 FROM workflow_topics WHERE id = ?", (topic_id,)
+                ).fetchone():
+                    connection.execute(
+                        "INSERT INTO workflow_routine_topics(routine_id, topic_id, position) "
+                        "VALUES(?, ?, ?)",
+                        (record_id, topic_id, position),
+                    )
+            connection.execute(
+                "DELETE FROM workflow_reminders WHERE routine_id = ?", (record_id,)
+            )
+            for offset in payload.get("reminder_offsets", []):
+                connection.execute(
+                    "INSERT INTO workflow_reminders(id, routine_id, offset_days, "
+                    "reminder_time) VALUES(?, ?, ?, ?)",
+                    (
+                        f"{record_id}:{offset}",
+                        record_id,
+                        int(offset),
+                        payload.get("due_time", "09:00"),
+                    ),
+                )
+            return
+        if collection == "occurrences":
+            connection.execute(
+                "UPDATE task_occurrences SET status = ?, revision = ?, updated_at = ? "
+                "WHERE id = ?",
+                (payload.get("status", "open"), revision, updated_at, record_id),
+            )
+            return
+        if collection == "invoices":
+            connection.execute(
+                """INSERT INTO accounting_invoices(
+                    id, invoice_number, invoice_date, due_date, currency, status,
+                    gross_cents, outstanding_cents, contact, source, revision,
+                    updated_at, archived_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    invoice_number=excluded.invoice_number,
+                    invoice_date=excluded.invoice_date, due_date=excluded.due_date,
+                    currency=excluded.currency, status=excluded.status,
+                    gross_cents=excluded.gross_cents,
+                    outstanding_cents=excluded.outstanding_cents,
+                    contact=excluded.contact, source=excluded.source,
+                    revision=excluded.revision, updated_at=excluded.updated_at,
+                    archived_at=excluded.archived_at""",
+                (
+                    record_id,
+                    payload.get("invoice_number", ""),
+                    payload.get("invoice_date", ""),
+                    payload.get("due_date", ""),
+                    payload.get("currency", "EUR"),
+                    payload.get("status", "open"),
+                    int(payload.get("gross_cents", 0)),
+                    int(payload.get("outstanding_cents", payload.get("gross_cents", 0))),
+                    payload.get("contact", ""),
+                    payload.get("source", "manual"),
+                    revision,
+                    updated_at,
+                    archived_at,
+                ),
+            )
 
     def load(self, collections: set[str]) -> dict[str, dict[str, Any]]:
         """Load all requested record collections."""
@@ -172,6 +576,24 @@ class StructuralOfficeDatabase:
                         "DELETE FROM records WHERE collection = ? AND record_id = ?",
                         (collection, removed_id),
                     )
+                    if collection == "topics":
+                        connection.execute(
+                            "UPDATE workflow_topics SET enabled = 0, archived_at = ?, "
+                            "updated_at = ? WHERE id = ?",
+                            (timestamp, timestamp, removed_id),
+                        )
+                    elif collection == "routines":
+                        connection.execute(
+                            "UPDATE workflow_routines SET enabled = 0, archived_at = ?, "
+                            "updated_at = ? WHERE id = ?",
+                            (timestamp, timestamp, removed_id),
+                        )
+                    elif collection == "invoices":
+                        connection.execute(
+                            "UPDATE accounting_invoices SET archived_at = ?, updated_at = ? "
+                            "WHERE id = ?",
+                            (timestamp, timestamp, removed_id),
+                        )
                 for record_id, payload in records.items():
                     encoded = json.dumps(
                         payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
@@ -189,6 +611,7 @@ class StructuralOfficeDatabase:
                             "archived_at = NULL WHERE collection = ? AND record_id = ?",
                             (encoded, timestamp, previous[1] + 1, collection, record_id),
                         )
+            self._sync_all_projections(connection)
 
     @staticmethod
     def _validate_collection(collection: str) -> None:
@@ -325,6 +748,17 @@ class StructuralOfficeDatabase:
             changed_fields = sorted(
                 key for key in set(previous) | set(payload) if previous.get(key) != payload.get(key)
             )
+            if collection in {"topics", "routines", "occurrences", "invoices"}:
+                self._project_record(
+                    connection,
+                    collection,
+                    record_id,
+                    encoded,
+                    revision,
+                    timestamp,
+                    created_at,
+                    None,
+                )
             sequence = self._record_change(
                 connection,
                 collection,
@@ -371,6 +805,17 @@ class StructuralOfficeDatabase:
                 "WHERE collection = ? AND record_id = ?",
                 (revision, timestamp, timestamp, collection, record_id),
             )
+            if collection in {"topics", "routines", "occurrences", "invoices"}:
+                self._project_record(
+                    connection,
+                    collection,
+                    record_id,
+                    row[2],
+                    revision,
+                    timestamp,
+                    row[5],
+                    timestamp,
+                )
             sequence = self._record_change(
                 connection,
                 collection,
@@ -582,14 +1027,20 @@ class StructuralOfficeDatabase:
             )
         return cursor.rowcount > 0
 
-    def add_import_batch(self, batch: dict[str, Any], raw_payload: bytes) -> None:
+    def add_import_batch(
+        self,
+        batch: dict[str, Any],
+        raw_payload: bytes,
+        rows: list[dict[str, Any]] | None = None,
+    ) -> None:
         """Record one applied source import and retain its original bytes."""
         with self._connect() as connection:
             connection.execute(
                 """INSERT INTO import_batches(
                     import_id, source_name, checksum, imported_at, record_count,
-                    created_count, updated_count, cancelled_count, raw_payload
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    created_count, updated_count, cancelled_count, raw_payload,
+                    known_row_count, new_row_count
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     batch["import_id"],
                     batch["source_name"],
@@ -600,8 +1051,26 @@ class StructuralOfficeDatabase:
                     batch["updated"],
                     batch["cancelled"],
                     raw_payload,
+                    batch.get("known_rows", 0),
+                    batch.get("new_rows", 0),
                 ),
             )
+            if rows:
+                connection.executemany(
+                    "INSERT OR IGNORE INTO invoice_import_rows("
+                    "row_fingerprint, import_id, invoice_number, row_number, imported_at) "
+                    "VALUES(?, ?, ?, ?, ?)",
+                    (
+                        (
+                            item["fingerprint"],
+                            batch["import_id"],
+                            item["invoice_number"],
+                            int(item["row_number"]),
+                            batch["imported_at"],
+                        )
+                        for item in rows
+                    ),
+                )
 
     def has_import_checksum(self, checksum: str) -> bool:
         """Return whether the exact source file was already applied."""
@@ -613,6 +1082,563 @@ class StructuralOfficeDatabase:
                 is not None
             )
 
+    def known_import_row_fingerprints(self, fingerprints: list[str]) -> set[str]:
+        """Return source-row fingerprints already retained by previous imports."""
+        if not fingerprints:
+            return set()
+        known: set[str] = set()
+        with self._connect() as connection:
+            for start in range(0, len(fingerprints), 500):
+                chunk = fingerprints[start : start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"SELECT row_fingerprint FROM invoice_import_rows "
+                    f"WHERE row_fingerprint IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                known.update(row[0] for row in rows)
+        return known
+
+    def add_import_rows(
+        self, import_id: str, rows: list[dict[str, Any]], imported_at: str
+    ) -> int:
+        """Persist previously unseen exported booking rows."""
+        with self._connect() as connection:
+            before = connection.total_changes
+            connection.executemany(
+                "INSERT OR IGNORE INTO invoice_import_rows("
+                "row_fingerprint, import_id, invoice_number, row_number, imported_at) "
+                "VALUES(?, ?, ?, ?, ?)",
+                (
+                    (
+                        item["fingerprint"],
+                        import_id,
+                        item["invoice_number"],
+                        int(item["row_number"]),
+                        imported_at,
+                    )
+                    for item in rows
+                ),
+            )
+            return connection.total_changes - before
+
+    def materialize_task_occurrences(
+        self, occurrences: list[dict[str, Any]], timestamp: str
+    ) -> dict[str, int]:
+        """Persist generated routine tasks and their checklist snapshots."""
+        created = 0
+        updated = 0
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for occurrence in occurrences:
+                exists = connection.execute(
+                    "SELECT status FROM task_occurrences WHERE id = ?",
+                    (occurrence["id"],),
+                ).fetchone()
+                snapshot = json.dumps(
+                    {
+                        "category": occurrence.get("category", ""),
+                        "description": occurrence.get("description", ""),
+                        "routine_name": occurrence.get("routine_name", ""),
+                        "topic_name": occurrence.get("topic_name", ""),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                due_at = f"{occurrence['due_date']}T{occurrence['due_time']}:00"
+                if exists is None:
+                    connection.execute(
+                        """INSERT INTO task_occurrences(
+                            id, routine_id, topic_id, source_type, source_id,
+                            scheduled_date, due_at, status, priority, topic_snapshot,
+                            created_at, updated_at
+                        ) VALUES(?, ?, ?, 'routine', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            occurrence["id"],
+                            occurrence["routine_id"],
+                            occurrence["topic_id"],
+                            occurrence["routine_id"],
+                            occurrence["due_date"],
+                            due_at,
+                            occurrence["status"],
+                            occurrence.get("priority", "normal"),
+                            snapshot,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    created += 1
+                elif exists[0] == "open":
+                    connection.execute(
+                        "UPDATE task_occurrences SET due_at = ?, priority = ?, "
+                        "topic_snapshot = ?, updated_at = ? WHERE id = ?",
+                        (
+                            due_at,
+                            occurrence.get("priority", "normal"),
+                            snapshot,
+                            timestamp,
+                            occurrence["id"],
+                        ),
+                    )
+                    updated += 1
+                raw_steps = occurrence.get("steps") or [
+                    {"title": title} for title in occurrence.get("checklist", [])
+                ]
+                for position, step in enumerate(raw_steps):
+                    item_id = f"{occurrence['id']}:{position}"
+                    connection.execute(
+                        "INSERT OR IGNORE INTO task_checklist_items("
+                        "id, task_id, source_step_id, position, title_snapshot, required) "
+                        "VALUES(?, ?, ?, ?, ?, ?)",
+                        (
+                            item_id,
+                            occurrence["id"],
+                            f"{occurrence['topic_id']}:{step.get('id') or position}",
+                            position,
+                            str(step.get("title", "")),
+                            int(step.get("required", True)),
+                        ),
+                    )
+        return {"created": created, "updated": updated}
+
+    def evaluate_accounting_tasks(
+        self,
+        evaluation_date: str,
+        timestamp: str,
+        evaluation_time: str,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Create or refresh one grouped task per due date, currency, and rule."""
+        evaluated = date.fromisoformat(evaluation_date)
+        created = 0
+        updated = 0
+        completed = 0
+        touched: list[str] = []
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rules = connection.execute(
+                "SELECT id, task_type, escalation_level, days_after_due, evaluation_time, "
+                "minimum_open_invoices, auto_complete_empty_batches "
+                "FROM accounting_escalation_rules WHERE enabled = 1"
+            ).fetchall()
+            processed_rule_ids: set[str] = set()
+            for rule in rules:
+                last_evaluation = connection.execute(
+                    "SELECT value FROM metadata WHERE key = ?",
+                    (f"accounting_last_evaluation:{rule[0]}",),
+                ).fetchone()
+                if not force and (
+                    rule[4] > evaluation_time
+                    or (last_evaluation and last_evaluation[0] == evaluation_date)
+                ):
+                    continue
+                processed_rule_ids.add(rule[0])
+                cutoff = (evaluated - timedelta(days=rule[3])).isoformat()
+                invoices = connection.execute(
+                    "SELECT id, due_date, currency, outstanding_cents FROM accounting_invoices "
+                    "WHERE status = 'open' AND outstanding_cents > 0 AND archived_at IS NULL "
+                    "AND due_date <= ? ORDER BY due_date, currency, invoice_number",
+                    (cutoff,),
+                ).fetchall()
+                groups: dict[tuple[str, str], list[tuple[Any, ...]]] = {}
+                for invoice in invoices:
+                    groups.setdefault((invoice[1], invoice[2]), []).append(invoice)
+                for (due_date, currency), members in groups.items():
+                    if len(members) < rule[5]:
+                        continue
+                    dedupe = f"{rule[1]}:{rule[2]}:{due_date}:{currency}"
+                    batch = connection.execute(
+                        "SELECT id, invoice_count_initial, revision FROM "
+                        "accounting_task_batches WHERE deduplication_key = ?",
+                        (dedupe,),
+                    ).fetchone()
+                    if batch is None:
+                        batch_id = uuid4().hex
+                        connection.execute(
+                            """INSERT INTO accounting_task_batches(
+                                id, task_type, escalation_level, source_due_date, currency,
+                                evaluation_date, due_at, status, invoice_count_initial,
+                                invoice_count_open, outstanding_cents, created_automatically,
+                                rule_id, deduplication_key, created_at, updated_at
+                            ) VALUES(?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, 1, ?, ?, ?, ?)""",
+                            (
+                                batch_id,
+                                rule[1],
+                                rule[2],
+                                due_date,
+                                currency,
+                                evaluation_date,
+                                f"{evaluation_date}T{rule[4]}:00",
+                                len(members),
+                                len(members),
+                                sum(item[3] for item in members),
+                                rule[0],
+                                dedupe,
+                                timestamp,
+                                timestamp,
+                            ),
+                        )
+                        created += 1
+                    else:
+                        batch_id = batch[0]
+                        connection.execute(
+                            "UPDATE accounting_task_batches SET evaluation_date = ?, "
+                            "due_at = ?, status = 'open', completed_at = NULL, "
+                            "updated_at = ?, revision = revision + 1 WHERE id = ?",
+                            (
+                                evaluation_date,
+                                f"{evaluation_date}T{rule[4]}:00",
+                                timestamp,
+                                batch_id,
+                            ),
+                        )
+                        updated += 1
+                    touched.append(batch_id)
+                    current_ids = {item[0] for item in members}
+                    for invoice_id, _due, _currency, outstanding in members:
+                        connection.execute(
+                            """INSERT INTO accounting_task_invoices(
+                                task_id, invoice_id, outstanding_cents_at_creation,
+                                outstanding_cents_current, status, included_at
+                            ) VALUES(?, ?, ?, ?, 'open', ?)
+                            ON CONFLICT(task_id, invoice_id) DO UPDATE SET
+                                outstanding_cents_current=excluded.outstanding_cents_current,
+                                status='open', resolved_at=NULL, resolution_reason=NULL,
+                                revision=accounting_task_invoices.revision + 1""",
+                            (batch_id, invoice_id, outstanding, outstanding, timestamp),
+                        )
+                    old_members = connection.execute(
+                        "SELECT invoice_id FROM accounting_task_invoices WHERE task_id = ?",
+                        (batch_id,),
+                    ).fetchall()
+                    for (invoice_id,) in old_members:
+                        if invoice_id in current_ids:
+                            continue
+                        state = connection.execute(
+                            "SELECT status, outstanding_cents FROM accounting_invoices "
+                            "WHERE id = ?",
+                            (invoice_id,),
+                        ).fetchone()
+                        reason = state[0] if state else "missing"
+                        outstanding = state[1] if state else 0
+                        connection.execute(
+                            "UPDATE accounting_task_invoices SET status = ?, "
+                            "outstanding_cents_current = ?, resolved_at = ?, "
+                            "resolution_reason = ?, revision = revision + 1 "
+                            "WHERE task_id = ? AND invoice_id = ?",
+                            (reason, outstanding, timestamp, reason, batch_id, invoice_id),
+                        )
+                    self._refresh_accounting_batch(connection, batch_id, timestamp, bool(rule[6]))
+
+                connection.execute(
+                    "INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
+                    (f"accounting_last_evaluation:{rule[0]}", evaluation_date),
+                )
+
+            open_batches = connection.execute(
+                "SELECT id, rule_id FROM accounting_task_batches WHERE status = 'open'"
+            ).fetchall()
+            for batch_id, rule_id in open_batches:
+                if batch_id in touched or rule_id not in processed_rule_ids:
+                    continue
+                auto_complete = connection.execute(
+                    "SELECT auto_complete_empty_batches FROM accounting_escalation_rules "
+                    "WHERE id = ?",
+                    (rule_id,),
+                ).fetchone()
+                was_completed = self._refresh_accounting_batch(
+                    connection,
+                    batch_id,
+                    timestamp,
+                    bool(auto_complete[0]) if auto_complete else True,
+                )
+                completed += int(was_completed)
+        return {
+            "completed": completed,
+            "created": created,
+            "evaluation_date": evaluation_date,
+            "updated": updated,
+        }
+
+    @staticmethod
+    def _refresh_accounting_batch(
+        connection: sqlite3.Connection,
+        batch_id: str,
+        timestamp: str,
+        auto_complete: bool,
+    ) -> bool:
+        members = connection.execute(
+            """SELECT link.invoice_id, invoice.status, invoice.outstanding_cents
+               FROM accounting_task_invoices AS link
+               LEFT JOIN accounting_invoices AS invoice ON invoice.id = link.invoice_id
+               WHERE link.task_id = ?""",
+            (batch_id,),
+        ).fetchall()
+        for invoice_id, invoice_status, invoice_outstanding in members:
+            status = invoice_status or "missing"
+            outstanding = int(invoice_outstanding or 0)
+            is_open = status == "open" and outstanding > 0
+            connection.execute(
+                "UPDATE accounting_task_invoices SET status = ?, "
+                "outstanding_cents_current = ?, resolved_at = ?, "
+                "resolution_reason = ?, revision = revision + 1 "
+                "WHERE task_id = ? AND invoice_id = ?",
+                (
+                    "open" if is_open else status,
+                    outstanding,
+                    None if is_open else timestamp,
+                    None if is_open else status,
+                    batch_id,
+                    invoice_id,
+                ),
+            )
+        open_members = [item for item in members if item[1] == "open" and item[2] > 0]
+        count = len(open_members)
+        outstanding = sum(item[2] for item in open_members)
+        completed = auto_complete and count == 0
+        connection.execute(
+            "UPDATE accounting_task_batches SET invoice_count_open = ?, "
+            "outstanding_cents = ?, status = ?, completed_at = ?, updated_at = ? "
+            "WHERE id = ?",
+            (
+                count,
+                outstanding,
+                "auto_completed" if completed else "open",
+                timestamp if completed else None,
+                timestamp,
+                batch_id,
+            ),
+        )
+        batch = connection.execute(
+            "SELECT task_type, escalation_level, source_due_date, due_at, status, "
+            "invoice_count_initial, invoice_count_open, outstanding_cents, currency "
+            "FROM accounting_task_batches WHERE id = ?",
+            (batch_id,),
+        ).fetchone()
+        task_id = f"accounting:{batch_id}"
+        snapshot = json.dumps(
+            {
+                "currency": batch[8],
+                "escalation_level": batch[1],
+                "invoice_count_initial": batch[5],
+                "invoice_count_open": batch[6],
+                "outstanding_cents": batch[7],
+                "source_due_date": batch[2],
+                "task_type": batch[0],
+            },
+            separators=(",", ":"),
+        )
+        connection.execute(
+            """INSERT INTO task_occurrences(
+                id, source_type, source_id, scheduled_date, due_at, status, priority,
+                topic_snapshot, created_at, updated_at
+            ) VALUES(?, 'accounting_due_batch', ?, ?, ?, ?, 'high', ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET due_at=excluded.due_at,
+                status=excluded.status, topic_snapshot=excluded.topic_snapshot,
+                updated_at=excluded.updated_at, revision=task_occurrences.revision + 1""",
+            (
+                task_id,
+                batch_id,
+                batch[2],
+                batch[3],
+                batch[4],
+                snapshot,
+                timestamp,
+                timestamp,
+            ),
+        )
+        return completed
+
+    def list_accounting_task_batches(
+        self, *, status: str | None = None, limit: int = 100, offset: int = 0
+    ) -> dict[str, Any]:
+        """Return grouped accounting tasks without expanding invoice payloads."""
+        limit = max(1, min(500, limit))
+        offset = max(0, offset)
+        where = "WHERE status = ?" if status else ""
+        params: tuple[Any, ...] = (status,) if status else ()
+        with self._connect() as connection:
+            total = connection.execute(
+                f"SELECT COUNT(*) FROM accounting_task_batches {where}", params
+            ).fetchone()[0]
+            rows = connection.execute(
+                "SELECT id, task_type, escalation_level, source_due_date, currency, "
+                "evaluation_date, due_at, status, invoice_count_initial, "
+                "invoice_count_open, outstanding_cents, created_automatically, "
+                "rule_id, created_at, updated_at, completed_at, revision "
+                f"FROM accounting_task_batches {where} ORDER BY due_at DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+        keys = (
+            "id", "task_type", "escalation_level", "source_due_date", "currency",
+            "evaluation_date", "due_at", "status", "invoice_count_initial",
+            "invoice_count_open", "outstanding_cents", "created_automatically",
+            "rule_id", "created_at", "updated_at", "completed_at", "revision",
+        )
+        return {
+            "items": [dict(zip(keys, row, strict=True)) for row in rows],
+            "limit": limit,
+            "offset": offset,
+            "total": total,
+        }
+
+    def accounting_task_invoice_ids(self, batch_id: str) -> list[dict[str, Any]]:
+        """Return exact invoice membership for one grouped accounting task."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT invoice_id, outstanding_cents_at_creation, "
+                "outstanding_cents_current, status, included_at, resolved_at, "
+                "resolution_reason, revision FROM accounting_task_invoices "
+                "WHERE task_id = ? ORDER BY invoice_id",
+                (batch_id,),
+            ).fetchall()
+        keys = (
+            "invoice_id", "outstanding_cents_at_creation", "outstanding_cents_current",
+            "status", "included_at", "resolved_at", "resolution_reason", "revision",
+        )
+        return [dict(zip(keys, row, strict=True)) for row in rows]
+
+    def list_materialized_tasks(
+        self,
+        *,
+        status: str | None = None,
+        source_type: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Return persisted routine and accounting tasks."""
+        limit = max(1, min(500, limit))
+        offset = max(0, offset)
+        clauses = ["archived_at IS NULL"]
+        params: list[Any] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if source_type:
+            clauses.append("source_type = ?")
+            params.append(source_type)
+        where = " AND ".join(clauses)
+        with self._connect() as connection:
+            total = connection.execute(
+                f"SELECT COUNT(*) FROM task_occurrences WHERE {where}", params
+            ).fetchone()[0]
+            rows = connection.execute(
+                "SELECT id, routine_id, topic_id, source_type, source_id, scheduled_date, "
+                "due_at, status, priority, topic_snapshot, started_at, completed_at, "
+                "completed_by, completion_note, revision, created_at, updated_at "
+                f"FROM task_occurrences WHERE {where} "
+                "ORDER BY due_at, id LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+        keys = (
+            "id", "routine_id", "topic_id", "source_type", "source_id",
+            "scheduled_date", "due_at", "status", "priority", "snapshot",
+            "started_at", "completed_at", "completed_by", "completion_note",
+            "revision", "created_at", "updated_at",
+        )
+        items = [dict(zip(keys, row, strict=True)) for row in rows]
+        for item in items:
+            item["snapshot"] = json.loads(item["snapshot"])
+        return {"items": items, "limit": limit, "offset": offset, "total": total}
+
+    def list_accounting_rules(self) -> list[dict[str, Any]]:
+        """Return accounting task-generation rules."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, task_type, escalation_level, days_after_due, evaluation_time, "
+                "group_by, minimum_open_invoices, maximum_invoices_per_batch, "
+                "auto_complete_empty_batches, notify_enabled, enabled, revision, "
+                "created_at, updated_at FROM accounting_escalation_rules "
+                "ORDER BY days_after_due, escalation_level"
+            ).fetchall()
+        keys = (
+            "id", "task_type", "escalation_level", "days_after_due",
+            "evaluation_time", "group_by", "minimum_open_invoices",
+            "maximum_invoices_per_batch", "auto_complete_empty_batches",
+            "notify_enabled", "enabled", "revision", "created_at", "updated_at",
+        )
+        return [dict(zip(keys, row, strict=True)) for row in rows]
+
+    def update_accounting_rule(
+        self,
+        rule_id: str,
+        changes: dict[str, Any],
+        expected_revision: int,
+        user_id: str,
+        user_name: str,
+    ) -> dict[str, Any]:
+        """Update a task-generation rule with revision protection."""
+        allowed = {
+            "auto_complete_empty_batches",
+            "days_after_due",
+            "enabled",
+            "evaluation_time",
+            "maximum_invoices_per_batch",
+            "minimum_open_invoices",
+            "notify_enabled",
+        }
+        if unknown := set(changes) - allowed:
+            raise StructuralOfficeValidationError(
+                f"Unsupported accounting rule fields: {', '.join(sorted(unknown))}"
+            )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT revision FROM accounting_escalation_rules WHERE id = ?",
+                (rule_id,),
+            ).fetchone()
+            if row is None:
+                raise StructuralOfficeValidationError("Accounting rule was not found")
+            if row[0] != expected_revision:
+                current = next(
+                    item for item in self.list_accounting_rules() if item["id"] == rule_id
+                )
+                raise StructuralOfficeConflictError(current)
+            normalized: dict[str, Any] = {}
+            for key, value in changes.items():
+                if key in {"days_after_due", "maximum_invoices_per_batch", "minimum_open_invoices"}:
+                    normalized[key] = int(value)
+                elif key in {"enabled", "notify_enabled", "auto_complete_empty_batches"}:
+                    normalized[key] = int(bool(value))
+                else:
+                    if not re.fullmatch(r"[0-2]\d:[0-5]\d", str(value)):
+                        raise StructuralOfficeValidationError("Evaluation time must use HH:MM")
+                    normalized[key] = str(value)
+            if normalized.get("days_after_due", 0) < 0:
+                raise StructuralOfficeValidationError("Days after due must not be negative")
+            if normalized.get("minimum_open_invoices", 1) < 1:
+                raise StructuralOfficeValidationError("Minimum open invoices must be positive")
+            if normalized.get("maximum_invoices_per_batch", 1) < 1:
+                raise StructuralOfficeValidationError(
+                    "Maximum invoices per batch must be positive"
+                )
+            timestamp = datetime.now(UTC).isoformat()
+            assignments = ", ".join(f"{key} = ?" for key in normalized)
+            if assignments:
+                connection.execute(
+                    f"UPDATE accounting_escalation_rules SET {assignments}, "
+                    "revision = revision + 1, updated_at = ? WHERE id = ?",
+                    (*normalized.values(), timestamp, rule_id),
+                )
+            updated = connection.execute(
+                "SELECT revision FROM accounting_escalation_rules WHERE id = ?",
+                (rule_id,),
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO audit_log(action, collection, record_id, revision, user_id, "
+                "user_name, details, created_at) VALUES('updated', 'accounting_rules', "
+                "?, ?, ?, ?, ?, ?)",
+                (
+                    rule_id,
+                    updated,
+                    user_id,
+                    user_name,
+                    json.dumps(sorted(normalized)),
+                    timestamp,
+                ),
+            )
+        return next(item for item in self.list_accounting_rules() if item["id"] == rule_id)
+
     def statistics(self) -> dict[str, Any]:
         """Return non-sensitive database health and size statistics."""
         with self._connect() as connection:
@@ -621,9 +1647,6 @@ class StructuralOfficeDatabase:
                 "SELECT value FROM metadata WHERE key = 'schema_version'"
             ).fetchone()[0]
             record_count = connection.execute("SELECT COUNT(*) FROM records").fetchone()[0]
-            import_count = connection.execute(
-                "SELECT COUNT(*) FROM import_batches"
-            ).fetchone()[0]
         return {
             "backup_count": len(self.list_backups()),
             "database_bytes": sum(
@@ -635,7 +1658,6 @@ class StructuralOfficeDatabase:
                 )
                 if path.exists()
             ),
-            "import_count": import_count,
             "integrity": integrity,
             "record_count": record_count,
             "schema_version": int(schema_version),

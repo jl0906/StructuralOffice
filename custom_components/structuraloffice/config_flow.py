@@ -13,13 +13,17 @@ from .const import (
     CONF_COMPANY_ADDRESS,
     CONF_COMPANY_EMAIL,
     CONF_COMPANY_NAME,
+    CONF_DEFAULT_PAYMENT_TERM_DAYS,
     CONF_DEFAULT_REMINDER_TIME,
     CONF_NOTIFY_TARGETS,
+    CONF_SEPA_DATE_AS_DUE_DATE,
     DEFAULT_CATCH_UP_HOURS,
     DEFAULT_COMPANY_ADDRESS,
     DEFAULT_COMPANY_EMAIL,
     DEFAULT_COMPANY_NAME,
+    DEFAULT_PAYMENT_TERM_DAYS,
     DEFAULT_REMINDER_TIME,
+    DEFAULT_SEPA_DATE_AS_DUE_DATE,
     DOMAIN,
     NAME,
 )
@@ -50,6 +54,25 @@ def _options_schema(values: dict[str, Any]) -> vol.Schema:
                     mode=selector.NumberSelectorMode.BOX,
                 )
             ),
+            vol.Required(
+                CONF_DEFAULT_PAYMENT_TERM_DAYS,
+                default=values.get(
+                    CONF_DEFAULT_PAYMENT_TERM_DAYS, DEFAULT_PAYMENT_TERM_DAYS
+                ),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=365,
+                    step=1,
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required(
+                CONF_SEPA_DATE_AS_DUE_DATE,
+                default=values.get(
+                    CONF_SEPA_DATE_AS_DUE_DATE, DEFAULT_SEPA_DATE_AS_DUE_DATE
+                ),
+            ): selector.BooleanSelector(),
             vol.Optional(
                 CONF_COMPANY_NAME,
                 default=values.get(CONF_COMPANY_NAME, DEFAULT_COMPANY_NAME),

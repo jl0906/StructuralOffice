@@ -1,73 +1,103 @@
 # StructuralOffice
 
-StructuralOffice ist eine lokale Home-Assistant-Custom-Integration für wiederkehrende betriebliche Abläufe. Topics bilden wiederverwendbare Aufgaben ab; Routinen verbinden diese Topics mit Fälligkeitstagen und Push-Erinnerungen.
+StructuralOffice is a local Home Assistant backend for recurring business processes and
+invoice due-date monitoring. The operational desktop interface is being moved to a
+separate Windows application. Home Assistant now provides database health statistics
+and managed backup controls only.
 
-## Funktionsumfang von Version 0.3
+## Version 0.4.0-alpha
 
-- Eigenes, responsives StructuralOffice-Panel in der Home-Assistant-Seitenleiste
-- Topics mit Beschreibung, Kategorie und Checkliste
-- Einmalige, tägliche, wöchentliche, monatliche und jährliche Routinen
-- Mehrere Topics, Fälligkeitstage und Erinnerungsabstände pro Routine
-- Status je erzeugter Aufgabe: offen, erledigt oder übersprungen
-- Pushbenachrichtigungen an ausgewählte `notify`-Entitäten
-- Nachholen verpasster Erinnerungen nach einem Home-Assistant-Ausfall
-- Drei native Aufgabensensoren und ein Fälligkeitskalender
-- Lokale, versionierte Speicherung über Home Assistants Storage-System
-- Deutsche und englische Einrichtungsdialoge
-- Eingangs- und Ausgangsrechnungen mit Netto-, Steuer- und Bruttobetrag
-- Zahlungsstatus, Fälligkeitsdatum, Bezahldatum und Mahnstufe
-- Individuelle Zahlungserinnerungen und mehrstufige Mahnfristen
-- Buchhaltungskennzahlen im Dashboard und vier zusätzliche Sensoren
-- Bearbeitung direkt im StructuralOffice-Panel
-- Validierte Excel-Vorlage, Importvorschau und Excel-Export
-- Neutraler CSV-Export als Schnittstelle zu externen Buchhaltungssystemen
-- Rollierende 12-Monats-Auswertung, Erledigungsquote und Forderungsalter
-- Zahlungserinnerungen sowie drei Mahnstufen als direkt erzeugte PDF-Dokumente
-- Rollen für Home-Assistant-Benutzer: Administrator, Bearbeiter und Betrachter
+This release introduces the backend boundary planned for the Windows client:
 
-StructuralOffice unterstützt die Organisation buchhalterischer Abläufe, ersetzt aber keine steuerliche oder rechtliche Beratung.
+- Dedicated, versioned SQLite database at
+  `/config/structuraloffice/structuraloffice.db`
+- One-time migration of existing alpha data from Home Assistant JSON storage
+- Authenticated REST API under `/api/structuraloffice/v1`
+- Semicolon-separated invoice-list CSV import with UTF-8 and Windows-1252 support
+- Invoice-number consolidation while preserving leading zeros
+- Cancellation detection when column J (`Offener Rechnungsbetrag`) is negative
+- Open, paid, cancelled, due-today, overdue, and upcoming invoice states
+- Freely configurable default payment term from 0 to 365 days
+- Optional use of the SEPA debit date as the invoice due date
+- Duplicate-source protection using a SHA-256 checksum
+- Original CSV retention in the import audit record
+- Manual payment-reminder and dunning-document generation for individual invoice
+  numbers, explicit selections, or an inclusive invoice-number range
+- Consistent SQLite backup creation, download, integrity validation, restoration, and
+  deletion from the Home Assistant panel
+- Database-size, record-count, backup-count, and import-count sensors
 
-## Installation über HACS
+StructuralOffice never creates payment reminders or dunning notices automatically.
+The backend only calculates invoice due states. A document is generated only after an
+authorized user explicitly requests it, and it must be reviewed before sending.
 
-Bis das Repository in der HACS-Standardliste enthalten ist:
+## Installation with HACS
 
-1. Dieses Repository in HACS als benutzerdefiniertes Repository vom Typ **Integration** hinzufügen.
-2. **StructuralOffice** installieren.
-3. Home Assistant neu starten.
-4. Unter **Einstellungen → Geräte & Dienste → Integration hinzufügen** nach StructuralOffice suchen.
-5. Mindestens eine `notify`-Entität auswählen.
+Until the repository is included in the default HACS repository list:
 
-Danach erscheint StructuralOffice in der Seitenleiste. Home-Assistant-Administratoren haben automatisch Vollzugriff und können im Panel weitere Benutzer als Bearbeiter oder Betrachter freischalten.
+1. Add this repository to HACS as a custom repository of type **Integration**.
+2. Install **StructuralOffice**.
+3. Restart Home Assistant.
+4. Open **Settings → Devices & services → Add integration** and select StructuralOffice.
+5. Configure the default payment term and whether a SEPA debit date overrides it.
 
-## Routinen
+The StructuralOffice sidebar panel is restricted to Home Assistant administrators. It
+contains backend statistics and backup management. Operational topics, routines,
+invoice imports, invoice lists, and document workflows are intended for the Windows
+application.
 
-Erinnerungsabstände werden relativ zum Fälligkeitstag angegeben:
+## Invoice-list CSV rules
 
-- `-7`: sieben Tage vorher
-- `-1`: einen Tag vorher
-- `0`: am Fälligkeitstag
-- `3`: drei Tage danach
+The importer expects the invoice export discussed for this project, including these
+columns:
 
-Monatliche Routinen können mehrere Monatstage enthalten. Einmalige Routinen können mehrere konkrete ISO-Daten (`JJJJ-MM-TT`) enthalten.
+- `Rechnungsnummer`
+- `Kundennummer`
+- `Rechnungsempfänger`
+- `Rechnungsdatum`
+- `Netto gesamt`
+- `Mehrwertsteuer gesamt`
+- `Brutto gesamt`
+- `Eingangsdatum`
+- `Eingangsbetrag gesamt`
+- `Offener Rechnungsbetrag`
 
-## Buchhaltung und Excel
+Rows are grouped by invoice number. A negative open amount in any row of a group marks
+the invoice as cancelled. Otherwise, a positive open amount means open and zero means
+paid. When enabled and populated, `Abbuchungstag SEPA` is the due date; otherwise the
+due date is the invoice date plus the configured payment term. Changing the default
+does not rewrite invoices already imported.
 
-Im Bereich **Buchhaltung** können Eingangs- und Ausgangsrechnungen direkt gepflegt werden. Eingangsrechnungen erzeugen Zahlungserinnerungen; bei offenen Ausgangsrechnungen können zusätzliche Mahnstufen beispielsweise 3, 10 und 20 Tage nach Fälligkeit ausgelöst werden.
+## REST API for the Windows client
 
-Über **Vorlage** wird eine bearbeitbare `.xlsx`-Datei heruntergeladen. Beim Import prüft StructuralOffice zunächst alle Zeilen und zeigt neue Datensätze, Aktualisierungen, Warnungen und Fehler an. Erst nach einer ausdrücklichen Bestätigung werden gültige Datensätze gespeichert.
+The API uses Home Assistant authentication. Clients send a valid Home Assistant bearer
+token in the `Authorization` header. Authorization is additionally limited by the
+StructuralOffice administrator, editor, and viewer roles.
 
-Die Excel-Datei ist ein Austauschformat. StructuralOffice bleibt die führende Datenquelle. Beim Export bleiben die internen IDs erhalten, sodass bearbeitete Zeilen beim nächsten Import aktualisiert werden können.
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/structuraloffice/v1/status` | Backend and database status |
+| `GET` | `/api/structuraloffice/v1/invoices` | Normalized invoices; supports `status` and `due_state` filters |
+| `POST` | `/api/structuraloffice/v1/imports/invoice-list` | Preview or apply a base64-encoded CSV import |
+| `POST` | `/api/structuraloffice/v1/documents` | Explicitly generate one PDF or a ZIP batch |
+| `GET/POST` | `/api/structuraloffice/v1/backups` | List or create backups |
+| `GET/POST/DELETE` | `/api/structuraloffice/v1/backups/{filename}` | Download, restore, or delete a backup |
 
-Der CSV-Export ist bewusst neutral gehalten. Für eine konkrete Buchhaltungssoftware kann darauf ein eigener Adapter aufbauen, ohne die interne Datenhaltung zu verändern.
+The import request contains `filename`, base64-encoded `content`, and `apply`. Use
+`apply: false` for validation and preview, then repeat the unchanged file with
+`apply: true` after confirmation.
 
-## Mahndokumente und Rollen
+Document requests specify `document_type` (`payment_reminder`, `dunning_1`,
+`dunning_2`, or `dunning_3`) and either `invoice_numbers` or
+`invoice_number_from`/`invoice_number_to`. Only open receivables are eligible.
 
-Für offene Ausgangsrechnungen erzeugt StructuralOffice Zahlungserinnerungen sowie erste, zweite und dritte Mahnungen als PDF. Firmenname, Anschrift und E-Mail werden im Optionsdialog der Integration gepflegt. Die erzeugten Schreiben sind Vorlagen und müssen vor dem Versand fachlich sowie rechtlich geprüft werden.
+## Backup and privacy
 
-- **Administrator:** Einstellungen, Benutzerrollen und alle Daten
-- **Bearbeiter:** Topics, Routinen, Aufgaben und Buchhaltung bearbeiten; Mahn-PDFs erzeugen
-- **Betrachter:** Daten und Auswertungen lesen; Excel und CSV exportieren
+Backups are stored in `/config/structuraloffice/backups`. Restore creates an additional
+safety backup before replacing the live database and rejects a source database that
+fails SQLite's integrity check. StructuralOffice does not transmit business data to a
+dedicated cloud service. Home Assistant access controls still apply to every API and
+panel request.
 
-## Datenschutz
-
-StructuralOffice überträgt keine Daten an einen eigenen Cloud-Dienst. Topics, Routinen, Aufgabenstatus und der Benachrichtigungsverlauf liegen im lokalen Home-Assistant-Speicher und werden von Home-Assistant-Backups erfasst.
+StructuralOffice is an organizational aid. It does not replace tax, legal, or
+professional accounting advice.

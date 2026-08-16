@@ -1,4 +1,4 @@
-"""StructuralOffice summary sensors."""
+"""StructuralOffice backend health sensors."""
 
 from __future__ import annotations
 
@@ -12,49 +12,10 @@ from . import StructuralOfficeConfigEntry
 from .manager import StructuralOfficeManager
 
 SENSORS = (
-    ("open_tasks", "Offene Aufgaben", "mdi:clipboard-text-clock", "summary", "open"),
-    (
-        "tasks_due_today",
-        "Heute fällige Aufgaben",
-        "mdi:calendar-today",
-        "summary",
-        "today",
-    ),
-    (
-        "overdue_tasks",
-        "Überfällige Aufgaben",
-        "mdi:calendar-alert",
-        "summary",
-        "overdue",
-    ),
-    (
-        "open_payables",
-        "Offene Eingangsrechnungen",
-        "mdi:invoice-arrow-left-outline",
-        "accounting_summary",
-        "open_payables",
-    ),
-    (
-        "due_payments",
-        "Fällige Zahlungen",
-        "mdi:cash-clock",
-        "accounting_summary",
-        "due_payments",
-    ),
-    (
-        "open_receivables",
-        "Offene Forderungen",
-        "mdi:invoice-arrow-right-outline",
-        "accounting_summary",
-        "open_receivables",
-    ),
-    (
-        "overdue_receivables",
-        "Überfällige Forderungen",
-        "mdi:cash-remove",
-        "accounting_summary",
-        "overdue_receivables",
-    ),
+    ("database_size", "Database Size", "mdi:database", "database_bytes", "B"),
+    ("database_records", "Database Records", "mdi:table-row", "record_count", "records"),
+    ("database_backups", "Database Backups", "mdi:database-check", "backup_count", "backups"),
+    ("csv_imports", "CSV Imports", "mdi:file-delimited", "import_count", "imports"),
 )
 
 
@@ -63,19 +24,18 @@ async def async_setup_entry(
     entry: StructuralOfficeConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up StructuralOffice sensors."""
+    """Set up StructuralOffice backend sensors."""
     manager = entry.runtime_data.manager
     async_add_entities(
-        StructuralOfficeSensor(manager, key, name, icon, section, summary_key)
-        for key, name, icon, section, summary_key in SENSORS
+        StructuralOfficeDatabaseSensor(manager, key, name, icon, statistic, unit)
+        for key, name, icon, statistic, unit in SENSORS
     )
 
 
-class StructuralOfficeSensor(SensorEntity):
-    """A calculated StructuralOffice task count."""
+class StructuralOfficeDatabaseSensor(SensorEntity):
+    """Represent one cached database statistic."""
 
     _attr_has_entity_name = True
-    _attr_native_unit_of_measurement = "Aufgaben"
 
     def __init__(
         self,
@@ -83,21 +43,21 @@ class StructuralOfficeSensor(SensorEntity):
         key: str,
         name: str,
         icon: str,
-        section: str,
-        summary_key: str,
+        statistic: str,
+        unit: str,
     ) -> None:
         self.manager = manager
-        self._section = section
-        self._summary_key = summary_key
+        self._statistic = statistic
         self._attr_unique_id = f"structuraloffice_{key}"
         self._attr_name = name
         self._attr_icon = icon
+        self._attr_native_unit_of_measurement = unit
         self._remove_listener: Callable[[], None] | None = None
 
     @property
     def native_value(self) -> int:
-        """Return the current task count."""
-        return int(self.manager.frontend_data()[self._section][self._summary_key])
+        """Return the current cached database statistic."""
+        return int(self.manager.database_stats.get(self._statistic, 0))
 
     async def async_added_to_hass(self) -> None:
         """Subscribe to manager changes."""

@@ -27,7 +27,7 @@ async def async_setup_entry(
 class StructuralOfficeCalendar(CalendarEntity):
     """Calendar containing open StructuralOffice tasks."""
 
-    _attr_name = "StructuralOffice Fälligkeiten"
+    _attr_name = "StructuralOffice Due Dates"
     _attr_unique_id = "structuraloffice_deadlines"
     _attr_icon = "mdi:calendar-check"
 

@@ -17,19 +17,19 @@ def export_invoices_csv(invoices: list[dict[str, Any]]) -> bytes:
     writer.writerow(
         [
             "ID",
-            "Typ",
-            "Kontakt",
-            "Rechnungsnummer",
-            "Rechnungsdatum",
-            "Faelligkeitsdatum",
-            "Nettobetrag",
-            "Steuerbetrag",
-            "Bruttobetrag",
-            "Waehrung",
+            "Type",
+            "Contact",
+            "Invoice_Number",
+            "Invoice_Date",
+            "Due_Date",
+            "Net_Amount",
+            "Tax_Amount",
+            "Gross_Amount",
+            "Currency",
             "Status",
-            "Bezahlt_am",
-            "Mahnstufe",
-            "Notiz",
+            "Paid_On",
+            "Dunning_Level",
+            "Note",
         ]
     )
     for invoice in invoices:
@@ -56,5 +56,4 @@ def export_invoices_csv(invoices: list[dict[str, Any]]) -> bytes:
 
 def csv_filename() -> str:
     """Return a stable dated filename."""
-    return f"StructuralOffice-Buchhaltung-{date.today().isoformat()}.csv"
-
+    return f"StructuralOffice-Accounting-{date.today().isoformat()}.csv"

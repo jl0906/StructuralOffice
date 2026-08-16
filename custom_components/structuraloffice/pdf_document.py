@@ -25,10 +25,10 @@ from .accounting import DIRECTION_RECEIVABLE, cents_to_amount
 from .models import StructuralOfficeValidationError
 
 DOCUMENT_TITLES = {
-    "payment_reminder": "Zahlungserinnerung",
-    "dunning_1": "1. Mahnung",
-    "dunning_2": "2. Mahnung",
-    "dunning_3": "3. Mahnung",
+    "payment_reminder": "Payment Reminder",
+    "dunning_1": "First Dunning Notice",
+    "dunning_2": "Second Dunning Notice",
+    "dunning_3": "Third Dunning Notice",
 }
 
 
@@ -38,8 +38,8 @@ def _page(canvas, document) -> None:
     canvas.line(20 * mm, 17 * mm, 190 * mm, 17 * mm)
     canvas.setFont("Helvetica", 8)
     canvas.setFillColor(colors.HexColor("#64748B"))
-    canvas.drawString(20 * mm, 11 * mm, "Erstellt mit StructuralOffice")
-    canvas.drawRightString(190 * mm, 11 * mm, f"Seite {document.page}")
+    canvas.drawString(20 * mm, 11 * mm, "Created with StructuralOffice")
+    canvas.drawRightString(190 * mm, 11 * mm, f"Page {document.page}")
     canvas.restoreState()
 
 
@@ -52,10 +52,10 @@ def build_invoice_pdf(
     """Build a payment reminder or dunning PDF."""
     if invoice["direction"] != DIRECTION_RECEIVABLE:
         raise StructuralOfficeValidationError(
-            "Mahndokumente können nur für Ausgangsrechnungen erstellt werden"
+            "Dunning documents can only be generated for receivables"
         )
     if document_type not in DOCUMENT_TITLES:
-        raise StructuralOfficeValidationError("Unbekannter Dokumenttyp")
+        raise StructuralOfficeValidationError("Unknown document type")
     document_date = document_date or date.today()
     company_name = company.get("name", "").strip() or "StructuralOffice"
     company_address = company.get("address", "").strip()
@@ -127,33 +127,35 @@ def build_invoice_pdf(
         Paragraph(recipient, normal),
         Spacer(1, 18 * mm),
         Paragraph(
-            f"{DOCUMENT_TITLES[document_type]} zur Rechnung {invoice['invoice_number']}",
+            f"{DOCUMENT_TITLES[document_type]} for invoice {invoice['invoice_number']}",
             styles["DocumentTitle"],
         ),
-        Paragraph(f"Datum: {document_date.strftime('%d.%m.%Y')}", normal),
+        Paragraph(f"Date: {document_date.strftime('%Y-%m-%d')}", normal),
         Spacer(1, 7 * mm),
-        Paragraph("Guten Tag,", normal),
+        Paragraph("Dear Sir or Madam,", normal),
         Spacer(1, 4 * mm),
     ]
     if document_type == "payment_reminder":
         body = (
-            "nach unseren Unterlagen ist die folgende Rechnung noch offen. "
-            "Möglicherweise hat sich Ihre Zahlung mit diesem Schreiben überschnitten. "
-            "Bitte prüfen Sie den Vorgang."
+            "Our records show that the following invoice remains outstanding. "
+            "Your payment may have crossed with this notice. Please review the matter."
         )
     else:
         body = (
-            "trotz Fälligkeit konnten wir für die folgende Rechnung noch keinen "
-            "Zahlungseingang feststellen. Bitte begleichen Sie den offenen Betrag "
-            "zeitnah oder nehmen Sie Kontakt mit uns auf."
+            "Although the following invoice is past due, we have not yet received "
+            "payment. Please settle the outstanding amount promptly or contact us."
         )
     story.extend([Paragraph(body, normal), Spacer(1, 7 * mm)])
 
     details = [
-        ["Rechnungsnummer", invoice["invoice_number"]],
-        ["Rechnungsdatum", date.fromisoformat(invoice["invoice_date"]).strftime("%d.%m.%Y")],
-        ["Ursprünglich fällig", date.fromisoformat(invoice["due_date"]).strftime("%d.%m.%Y")],
-        ["Offener Betrag", f"{cents_to_amount(invoice['gross_cents'])} {invoice['currency']}"],
+        ["Invoice number", invoice["invoice_number"]],
+        ["Invoice date", date.fromisoformat(invoice["invoice_date"]).strftime("%Y-%m-%d")],
+        ["Original due date", date.fromisoformat(invoice["due_date"]).strftime("%Y-%m-%d")],
+        [
+            "Outstanding amount",
+            f"{cents_to_amount(invoice.get('outstanding_cents', invoice['gross_cents']))} "
+            f"{invoice['currency']}",
+        ],
     ]
     detail_table = Table(details, colWidths=[55 * mm, 105 * mm])
     detail_table.setStyle(
@@ -173,13 +175,13 @@ def build_invoice_pdf(
         [
             detail_table,
             Spacer(1, 10 * mm),
-            Paragraph("Vielen Dank.", normal),
+            Paragraph("Thank you.", normal),
             Spacer(1, 8 * mm),
-            Paragraph(f"Freundliche Grüße<br/>{company_name}", normal),
+            Paragraph(f"Sincerely,<br/>{company_name}", normal),
             Spacer(1, 14 * mm),
             Paragraph(
-                "Hinweis: Dieses Dokument wurde automatisch als Organisationshilfe erstellt. "
-                "Bitte prüfen Sie Inhalt, Fristen und rechtliche Anforderungen vor dem Versand.",
+                "Notice: This document was generated automatically as an organizational aid. "
+                "Review its content, deadlines, and legal requirements before sending it.",
                 ParagraphStyle(
                     name="Disclaimer",
                     parent=normal,
@@ -192,4 +194,3 @@ def build_invoice_pdf(
     )
     document.build(story)
     return buffer.getvalue()
-

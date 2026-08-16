@@ -24,40 +24,40 @@ from .accounting import (
 )
 from .models import StructuralOfficeValidationError
 
-SHEET_NAME = "Buchhaltung"
+SHEET_NAME = "Accounting"
 MAX_FILE_SIZE = 5 * 1024 * 1024
 MAX_UNCOMPRESSED_SIZE = 25 * 1024 * 1024
 MAX_ROWS = 5000
-TEMPLATE_PATH = Path(__file__).parent / "assets" / "StructuralOffice-Buchhaltung-Vorlage.xlsx"
+TEMPLATE_PATH = Path(__file__).parent / "assets" / "StructuralOffice-Accounting-Template.xlsx"
 
 HEADERS = [
     "ID",
-    "Typ",
-    "Kontakt",
-    "Rechnungsnummer",
-    "Rechnungsdatum",
-    "Fälligkeitsdatum",
-    "Nettobetrag",
-    "Steuerbetrag",
-    "Bruttobetrag",
-    "Währung",
+    "Type",
+    "Contact",
+    "Invoice Number",
+    "Invoice Date",
+    "Due Date",
+    "Net Amount",
+    "Tax Amount",
+    "Gross Amount",
+    "Currency",
     "Status",
-    "Bezahlt am",
-    "Mahnstufe",
-    "Zahlungserinnerungen (Tage)",
-    "Mahnfristen (Tage)",
-    "Notiz",
-    "Letzte Änderung",
+    "Paid On",
+    "Dunning Level",
+    "Payment Reminders (Days)",
+    "Dunning Periods (Days)",
+    "Note",
+    "Last Modified",
 ]
 
 DIRECTION_LABELS = {
-    DIRECTION_PAYABLE: "Eingangsrechnung",
-    DIRECTION_RECEIVABLE: "Ausgangsrechnung",
+    DIRECTION_PAYABLE: "Payable",
+    DIRECTION_RECEIVABLE: "Receivable",
 }
 STATUS_LABELS = {
-    INVOICE_STATUS_OPEN: "Offen",
-    INVOICE_STATUS_PAID: "Bezahlt",
-    INVOICE_STATUS_CANCELLED: "Storniert",
+    INVOICE_STATUS_OPEN: "Open",
+    INVOICE_STATUS_PAID: "Paid",
+    INVOICE_STATUS_CANCELLED: "Cancelled",
 }
 
 
@@ -69,18 +69,18 @@ def load_template_xlsx() -> bytes:
 def _safe_workbook(content: bytes):
     """Load a size-limited XLSX workbook."""
     if not content or len(content) > MAX_FILE_SIZE:
-        raise StructuralOfficeValidationError("Excel-Datei ist leer oder größer als 5 MB")
+        raise StructuralOfficeValidationError("Excel file is empty or larger than 5 MB")
     try:
         with ZipFile(BytesIO(content)) as archive:
             infos = archive.infolist()
             if len(infos) > 250 or sum(item.file_size for item in infos) > MAX_UNCOMPRESSED_SIZE:
-                raise StructuralOfficeValidationError("Excel-Datei ist nach dem Entpacken zu groß")
+                raise StructuralOfficeValidationError("Uncompressed Excel file is too large")
     except BadZipFile as err:
-        raise StructuralOfficeValidationError("Datei ist keine gültige XLSX-Datei") from err
+        raise StructuralOfficeValidationError("File is not a valid XLSX workbook") from err
     try:
         return load_workbook(BytesIO(content), read_only=True, data_only=True)
     except Exception as err:
-        raise StructuralOfficeValidationError("Excel-Datei konnte nicht gelesen werden") from err
+        raise StructuralOfficeValidationError("Excel file could not be read") from err
 
 
 def _normalized_header(value: Any) -> str:
@@ -139,16 +139,33 @@ def parse_invoices_xlsx(content: bytes) -> dict[str, Any]:
     try:
         raw_headers = next(rows)
     except StopIteration as err:
-        raise StructuralOfficeValidationError("Excel-Tabelle ist leer") from err
+        raise StructuralOfficeValidationError("Excel worksheet is empty") from err
 
     header_map = {_normalized_header(value): index for index, value in enumerate(raw_headers)}
-    required = ["typ", "kontakt", "rechnungsnummer", "rechnungsdatum", "fälligkeitsdatum"]
-    missing = [header for header in required if header not in header_map]
+    required = {
+        "Type": ("type", "typ"),
+        "Contact": ("contact", "kontakt"),
+        "Invoice Number": ("invoice number", "rechnungsnummer"),
+        "Invoice Date": ("invoice date", "rechnungsdatum"),
+        "Due Date": ("due date", "fälligkeitsdatum"),
+    }
+    missing = [
+        label
+        for label, aliases in required.items()
+        if not any(alias in header_map for alias in aliases)
+    ]
     if missing:
-        raise StructuralOfficeValidationError(f"Pflichtspalten fehlen: {', '.join(missing)}")
+        raise StructuralOfficeValidationError(f"Required columns are missing: {', '.join(missing)}")
 
-    def cell(row: tuple[Any, ...], name: str) -> Any:
-        index = header_map.get(_normalized_header(name))
+    def cell(row: tuple[Any, ...], *names: str) -> Any:
+        index = next(
+            (
+                header_map[_normalized_header(name)]
+                for name in names
+                if _normalized_header(name) in header_map
+            ),
+            None,
+        )
         return row[index] if index is not None and index < len(row) else None
 
     records: list[dict[str, Any]] = []
@@ -158,38 +175,45 @@ def parse_invoices_xlsx(content: bytes) -> dict[str, Any]:
     seen_business_keys: set[tuple[str, str, str]] = set()
     for row_number, row in enumerate(rows, start=2):
         if row_number > MAX_ROWS + 1:
-            errors.append({"row": row_number, "message": f"Maximal {MAX_ROWS} Datensätze erlaubt"})
+            errors.append(
+                {
+                    "row": row_number,
+                    "message": f"A maximum of {MAX_ROWS} records is allowed",
+                }
+            )
             break
         identity_values = (
-            cell(row, "Kontakt"),
-            cell(row, "Rechnungsnummer"),
-            cell(row, "Rechnungsdatum"),
-            cell(row, "Fälligkeitsdatum"),
+            cell(row, "Contact", "Kontakt"),
+            cell(row, "Invoice Number", "Rechnungsnummer"),
+            cell(row, "Invoice Date", "Rechnungsdatum"),
+            cell(row, "Due Date", "Fälligkeitsdatum"),
         )
         if not any(value not in (None, "") for value in identity_values):
             continue
         raw = {
             "id": cell(row, "ID"),
-            "direction": _direction(cell(row, "Typ")),
-            "contact": cell(row, "Kontakt"),
-            "invoice_number": cell(row, "Rechnungsnummer"),
-            "invoice_date": _as_iso_date(cell(row, "Rechnungsdatum")),
-            "due_date": _as_iso_date(cell(row, "Fälligkeitsdatum")),
-            "net_amount": cell(row, "Nettobetrag"),
-            "tax_amount": cell(row, "Steuerbetrag"),
-            "gross_amount": cell(row, "Bruttobetrag"),
-            "currency": cell(row, "Währung") or "EUR",
+            "direction": _direction(cell(row, "Type", "Typ")),
+            "contact": cell(row, "Contact", "Kontakt"),
+            "invoice_number": cell(row, "Invoice Number", "Rechnungsnummer"),
+            "invoice_date": _as_iso_date(cell(row, "Invoice Date", "Rechnungsdatum")),
+            "due_date": _as_iso_date(cell(row, "Due Date", "Fälligkeitsdatum")),
+            "net_amount": cell(row, "Net Amount", "Nettobetrag"),
+            "tax_amount": cell(row, "Tax Amount", "Steuerbetrag"),
+            "gross_amount": cell(row, "Gross Amount", "Bruttobetrag"),
+            "currency": cell(row, "Currency", "Währung") or "EUR",
             "status": _status(cell(row, "Status")),
-            "paid_date": _as_iso_date(cell(row, "Bezahlt am")),
-            "dunning_level": cell(row, "Mahnstufe") or 0,
-            "payment_reminder_offsets": cell(row, "Zahlungserinnerungen (Tage)"),
-            "dunning_offsets": cell(row, "Mahnfristen (Tage)"),
-            "note": cell(row, "Notiz"),
+            "paid_date": _as_iso_date(cell(row, "Paid On", "Bezahlt am")),
+            "dunning_level": cell(row, "Dunning Level", "Mahnstufe") or 0,
+            "payment_reminder_offsets": cell(
+                row, "Payment Reminders (Days)", "Zahlungserinnerungen (Tage)"
+            ),
+            "dunning_offsets": cell(row, "Dunning Periods (Days)", "Mahnfristen (Tage)"),
+            "note": cell(row, "Note", "Notiz"),
         }
         try:
             invoice = validate_invoice(raw)
             if invoice["id"] in seen_ids:
-                errors.append({"row": row_number, "message": "ID ist in der Datei doppelt"})
+                errors.append({"row": row_number, "message": "ID is duplicated in the file"})
                 continue
             seen_ids.add(invoice["id"])
             business_key = (
@@ -201,7 +225,7 @@ def parse_invoices_xlsx(content: bytes) -> dict[str, Any]:
                 warnings.append(
                     {
                         "row": row_number,
-                        "message": "Möglicherweise doppelte Rechnungsnummer für diesen Kontakt",
+                        "message": "Possible duplicate invoice number for this contact",
                     }
                 )
             seen_business_keys.add(business_key)
@@ -248,7 +272,7 @@ def export_invoices_xlsx(invoices: list[dict[str, Any]]) -> bytes:
         sheet.append(
             [
                 None,
-                "Eingangsrechnung",
+                "Payable",
                 "",
                 "",
                 None,
@@ -257,7 +281,7 @@ def export_invoices_xlsx(invoices: list[dict[str, Any]]) -> bytes:
                 0,
                 0,
                 "EUR",
-                "Offen",
+                "Open",
                 None,
                 0,
                 "-7, -1, 0",
@@ -284,10 +308,10 @@ def export_invoices_xlsx(invoices: list[dict[str, Any]]) -> bytes:
             sheet.cell(row, column).number_format = "#,##0.00 [$€-407]"
 
     type_validation = DataValidation(
-        type="list", formula1='"Eingangsrechnung,Ausgangsrechnung"', allow_blank=False
+        type="list", formula1='"Payable,Receivable"', allow_blank=False
     )
     status_validation = DataValidation(
-        type="list", formula1='"Offen,Bezahlt,Storniert"', allow_blank=False
+        type="list", formula1='"Open,Paid,Cancelled"', allow_blank=False
     )
     sheet.add_data_validation(type_validation)
     sheet.add_data_validation(status_validation)
@@ -296,7 +320,7 @@ def export_invoices_xlsx(invoices: list[dict[str, Any]]) -> bytes:
     sheet.conditional_formatting.add(
         "A2:Q5001",
         FormulaRule(
-            formula=['AND($K2="Offen",$F2<TODAY(),$F2<>"")'],
+            formula=['AND($K2="Open",$F2<TODAY(),$F2<>"")'],
             fill=PatternFill("solid", fgColor="FEE2E2"),
         ),
     )

@@ -6,6 +6,8 @@
     "step": {
       "user": {
         "data": {
+          "default_payment_term_days": "Standard-Zahlungsziel (Tage)",
+          "sepa_date_as_due_date": "SEPA-Abbuchungstag als Faelligkeit verwenden",
           "catch_up_hours": "Verpasste Erinnerungen nachholen (Stunden)",
           "default_reminder_time": "Standardzeit für Erinnerungen",
           "notify_targets": "Benachrichtigungsgeräte",
@@ -14,6 +16,8 @@
           "company_email": "E-Mail-Adresse"
         },
         "data_description": {
+          "default_payment_term_days": "Wird bei importierten Rechnungen ohne eigenes Faelligkeitsdatum verwendet.",
+          "sepa_date_as_due_date": "Ein vorhandener SEPA-Abbuchungstag ersetzt das berechnete Zahlungsziel.",
           "catch_up_hours": "Wie lange eine während eines Ausfalls verpasste Erinnerung noch gesendet werden darf.",
           "notify_targets": "Eine oder mehrere Notify-Entitäten, beispielsweise dein Smartphone."
         },
@@ -26,6 +30,8 @@
     "step": {
       "init": {
         "data": {
+          "default_payment_term_days": "Standard-Zahlungsziel (Tage)",
+          "sepa_date_as_due_date": "SEPA-Abbuchungstag als Faelligkeit verwenden",
           "catch_up_hours": "Verpasste Erinnerungen nachholen (Stunden)",
           "default_reminder_time": "Standardzeit für Erinnerungen",
           "notify_targets": "Benachrichtigungsgeräte",
@@ -34,6 +40,8 @@
           "company_email": "E-Mail-Adresse"
         },
         "data_description": {
+          "default_payment_term_days": "Neue CSV-Importe verwenden diesen Wert; bestehende Faelligkeiten bleiben unveraendert.",
+          "sepa_date_as_due_date": "Ein vorhandener SEPA-Abbuchungstag ersetzt das berechnete Zahlungsziel.",
           "catch_up_hours": "0 deaktiviert das Nachholen.",
           "notify_targets": "Diese Ziele erhalten Erinnerungen aus StructuralOffice."
         },

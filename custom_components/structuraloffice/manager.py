@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
+from functools import partial
+from pathlib import Path
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -14,26 +16,30 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .accounting import (
-    DIRECTION_PAYABLE,
-    DIRECTION_RECEIVABLE,
-    INVOICE_STATUS_OPEN,
     accounting_summary,
     invoice_for_frontend,
     validate_invoice,
 )
 from .analytics import build_accounting_analytics, build_workflow_analytics
 from .const import (
+    BACKUP_DIRECTORY,
     CONF_CATCH_UP_HOURS,
     CONF_COMPANY_ADDRESS,
     CONF_COMPANY_EMAIL,
     CONF_COMPANY_NAME,
+    CONF_DEFAULT_PAYMENT_TERM_DAYS,
     CONF_DEFAULT_REMINDER_TIME,
     CONF_NOTIFY_TARGETS,
+    CONF_SEPA_DATE_AS_DUE_DATE,
+    DATABASE_DIRECTORY,
+    DATABASE_FILENAME,
     DEFAULT_CATCH_UP_HOURS,
     DEFAULT_COMPANY_ADDRESS,
     DEFAULT_COMPANY_EMAIL,
     DEFAULT_COMPANY_NAME,
+    DEFAULT_PAYMENT_TERM_DAYS,
     DEFAULT_REMINDER_TIME,
+    DEFAULT_SEPA_DATE_AS_DUE_DATE,
     DOMAIN,
     SCHEDULER_INTERVAL,
     STATUS_OPEN,
@@ -42,6 +48,8 @@ from .const import (
     UPDATE_EVENT,
     VALID_STATUSES,
 )
+from .database import StructuralOfficeDatabase
+from .invoice_csv import parse_invoice_list_csv
 from .models import (
     StructuralOfficeValidationError,
     iter_due_dates,
@@ -64,7 +72,14 @@ class StructuralOfficeManager:
             STORAGE_VERSION,
             f"{STORAGE_KEY_PREFIX}.{entry.entry_id}",
         )
+        database_directory = Path(hass.config.path(DATABASE_DIRECTORY))
+        self.database = StructuralOfficeDatabase(
+            database_directory / DATABASE_FILENAME,
+            database_directory / BACKUP_DIRECTORY,
+        )
         self.data: dict[str, Any] = self._empty_data()
+        self.database_stats: dict[str, Any] = {}
+        self.backups: list[dict[str, Any]] = []
         self._listeners: set[Callable[[], None]] = set()
         self._remove_timer: Callable[[], None] | None = None
 
@@ -80,12 +95,25 @@ class StructuralOfficeManager:
         }
 
     async def async_initialize(self) -> None:
-        """Load data and start the reminder scheduler."""
-        loaded = await self.store.async_load()
-        if isinstance(loaded, dict):
-            for key in self.data:
-                if isinstance(loaded.get(key), dict):
-                    self.data[key] = loaded[key]
+        """Load the dedicated database, migrating legacy JSON storage once."""
+        await self.hass.async_add_executor_job(self.database.initialize)
+        loaded = await self.hass.async_add_executor_job(
+            self.database.load, set(self.data)
+        )
+        if any(loaded.values()):
+            self.data.update(loaded)
+        else:
+            legacy = await self.store.async_load()
+            if isinstance(legacy, dict):
+                for key in self.data:
+                    if isinstance(legacy.get(key), dict):
+                        self.data[key] = legacy[key]
+                if any(self.data.values()):
+                    await self.hass.async_add_executor_job(
+                        self.database.save, self.data
+                    )
+                    _LOGGER.info("Migrated legacy StructuralOffice storage to SQLite")
+        await self._async_refresh_database_stats()
         self._remove_timer = async_track_time_interval(
             self.hass, self._async_timer, SCHEDULER_INTERVAL
         )
@@ -96,7 +124,7 @@ class StructuralOfficeManager:
         if self._remove_timer is not None:
             self._remove_timer()
             self._remove_timer = None
-        await self.store.async_save(self.data)
+        await self.hass.async_add_executor_job(self.database.save, self.data)
 
     async def _async_timer(self, _now: datetime) -> None:
         await self.async_process_reminders()
@@ -120,8 +148,15 @@ class StructuralOfficeManager:
         self.hass.bus.async_fire(UPDATE_EVENT)
 
     async def _async_save(self) -> None:
-        await self.store.async_save(self.data)
+        await self.hass.async_add_executor_job(self.database.save, self.data)
+        await self._async_refresh_database_stats()
         self._notify_changed()
+
+    async def _async_refresh_database_stats(self) -> None:
+        self.database_stats = await self.hass.async_add_executor_job(
+            self.database.statistics
+        )
+        self.backups = await self.hass.async_add_executor_job(self.database.list_backups)
 
     @property
     def options(self) -> dict[str, Any]:
@@ -133,6 +168,16 @@ class StructuralOfficeManager:
             ),
             CONF_CATCH_UP_HOURS: int(
                 self.entry.options.get(CONF_CATCH_UP_HOURS, DEFAULT_CATCH_UP_HOURS)
+            ),
+            CONF_DEFAULT_PAYMENT_TERM_DAYS: int(
+                self.entry.options.get(
+                    CONF_DEFAULT_PAYMENT_TERM_DAYS, DEFAULT_PAYMENT_TERM_DAYS
+                )
+            ),
+            CONF_SEPA_DATE_AS_DUE_DATE: bool(
+                self.entry.options.get(
+                    CONF_SEPA_DATE_AS_DUE_DATE, DEFAULT_SEPA_DATE_AS_DUE_DATE
+                )
             ),
             CONF_COMPANY_NAME: str(
                 self.entry.options.get(CONF_COMPANY_NAME, DEFAULT_COMPANY_NAME)
@@ -155,7 +200,7 @@ class StructuralOfficeManager:
     async def async_set_user_role(self, user_id: str, role: str | None) -> None:
         """Assign or remove a StructuralOffice role."""
         if role is not None and role not in {"viewer", "editor"}:
-            raise StructuralOfficeValidationError("Ungültige Rolle")
+            raise StructuralOfficeValidationError("Invalid role")
         if role is None:
             self.data["user_roles"].pop(user_id, None)
         else:
@@ -174,7 +219,7 @@ class StructuralOfficeManager:
     async def async_delete_topic(self, topic_id: str) -> None:
         """Delete an unused topic."""
         if topic_id not in self.data["topics"]:
-            raise StructuralOfficeValidationError("Topic wurde nicht gefunden")
+            raise StructuralOfficeValidationError("Topic was not found")
         used_by = [
             routine["name"]
             for routine in self.data["routines"].values()
@@ -182,7 +227,7 @@ class StructuralOfficeManager:
         ]
         if used_by:
             raise StructuralOfficeValidationError(
-                f"Topic wird noch verwendet: {', '.join(used_by)}"
+                f"Topic is still in use: {', '.join(used_by)}"
             )
         del self.data["topics"][topic_id]
         await self._async_save()
@@ -199,7 +244,7 @@ class StructuralOfficeManager:
     async def async_delete_routine(self, routine_id: str) -> None:
         """Delete a routine and its generated state."""
         if self.data["routines"].pop(routine_id, None) is None:
-            raise StructuralOfficeValidationError("Routine wurde nicht gefunden")
+            raise StructuralOfficeValidationError("Routine was not found")
         prefix = f"{routine_id}:"
         self.data["occurrences"] = {
             key: value
@@ -225,7 +270,7 @@ class StructuralOfficeManager:
     async def async_delete_invoice(self, invoice_id: str) -> None:
         """Delete an accounting record and its notification history."""
         if self.data["invoices"].pop(invoice_id, None) is None:
-            raise StructuralOfficeValidationError("Buchung wurde nicht gefunden")
+            raise StructuralOfficeValidationError("Accounting record was not found")
         prefix = f"invoice:{invoice_id}:"
         self.data["notifications"] = {
             key: value
@@ -237,7 +282,7 @@ class StructuralOfficeManager:
     async def async_import_invoices(self, records: list[dict[str, Any]]) -> dict[str, int]:
         """Validate and apply a confirmed Excel import."""
         if len(records) > 5000:
-            raise StructuralOfficeValidationError("Maximal 5000 Buchungen erlaubt")
+            raise StructuralOfficeValidationError("A maximum of 5,000 records is allowed")
         normalized: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         created = 0
@@ -247,7 +292,7 @@ class StructuralOfficeManager:
             existing_id = requested_id if requested_id in self.data["invoices"] else None
             invoice = validate_invoice(raw, existing_id)
             if invoice["id"] in seen_ids:
-                raise StructuralOfficeValidationError("Import enthält doppelte IDs")
+                raise StructuralOfficeValidationError("Import contains duplicate IDs")
             seen_ids.add(invoice["id"])
             if existing_id:
                 updated += 1
@@ -259,12 +304,98 @@ class StructuralOfficeManager:
         await self._async_save()
         return {"created": created, "updated": updated}
 
+    async def async_import_invoice_csv(
+        self,
+        content: bytes,
+        source_name: str,
+        *,
+        apply: bool,
+    ) -> dict[str, Any]:
+        """Preview or apply an invoice-list CSV export."""
+        parsed = await self.hass.async_add_executor_job(
+            partial(
+                parse_invoice_list_csv,
+                content,
+                self.options[CONF_DEFAULT_PAYMENT_TERM_DAYS],
+                use_sepa_date=self.options[CONF_SEPA_DATE_AS_DUE_DATE],
+            )
+        )
+        existing = self.data["invoices"]
+        parsed["created"] = sum(item["id"] not in existing for item in parsed["records"])
+        parsed["updated"] = sum(item["id"] in existing for item in parsed["records"])
+        parsed["already_imported"] = await self.hass.async_add_executor_job(
+            self.database.has_import_checksum, parsed["checksum"]
+        )
+        if not apply:
+            return parsed
+        if parsed["errors"]:
+            raise StructuralOfficeValidationError("CSV import contains validation errors")
+        if parsed["already_imported"]:
+            raise StructuralOfficeValidationError("This exact CSV file was already imported")
+
+        result = await self.async_import_invoices(parsed["records"])
+        imported_at = dt_util.utcnow().isoformat()
+        batch = {
+            "cancelled": parsed["cancelled"],
+            "checksum": parsed["checksum"],
+            "created": result["created"],
+            "import_id": f"csv-{parsed['checksum'][:24]}",
+            "imported_at": imported_at,
+            "record_count": len(parsed["records"]),
+            "source_name": Path(source_name).name[:255] or "invoice-list.csv",
+            "updated": result["updated"],
+        }
+        await self.hass.async_add_executor_job(
+            self.database.add_import_batch, batch, content
+        )
+        await self._async_refresh_database_stats()
+        return batch
+
+    async def async_create_backup(self) -> dict[str, Any]:
+        """Create a consistent database backup."""
+        result = await self.hass.async_add_executor_job(self.database.create_backup)
+        await self._async_refresh_database_stats()
+        self._notify_changed()
+        return result
+
+    async def async_restore_backup(self, filename: str) -> None:
+        """Restore a managed backup and reload all in-memory records."""
+        await self.hass.async_add_executor_job(self.database.restore_backup, filename)
+        self.data = await self.hass.async_add_executor_job(
+            self.database.load, set(self.data)
+        )
+        await self._async_refresh_database_stats()
+        self._notify_changed()
+
+    async def async_delete_backup(self, filename: str) -> None:
+        """Delete a managed backup."""
+        await self.hass.async_add_executor_job(self.database.delete_backup, filename)
+        await self._async_refresh_database_stats()
+        self._notify_changed()
+
+    def system_data(self) -> dict[str, Any]:
+        """Return the deliberately small Home Assistant administration view."""
+        today = dt_util.now().date()
+        invoices = [invoice_for_frontend(item, today) for item in self.data["invoices"].values()]
+        return {
+            "backups": list(self.backups),
+            "database": dict(self.database_stats),
+            "invoice_status": {
+                "cancelled": sum(item["status"] == "cancelled" for item in invoices),
+                "due_today": sum(item["due_state"] == "due_today" for item in invoices),
+                "open": sum(item["status"] == "open" for item in invoices),
+                "overdue": sum(item["due_state"] == "overdue" for item in invoices),
+                "paid": sum(item["status"] == "paid" for item in invoices),
+            },
+            "version": "0.4.0-alpha",
+        }
+
     async def async_set_occurrence_status(self, item_id: str, status: str) -> dict[str, Any]:
         """Set the status of one generated topic occurrence."""
         if status not in VALID_STATUSES:
-            raise StructuralOfficeValidationError("Ungültiger Status")
+            raise StructuralOfficeValidationError("Invalid status")
         if not self._occurrence_exists(item_id):
-            raise StructuralOfficeValidationError("Aufgabe wurde nicht gefunden")
+            raise StructuralOfficeValidationError("Task was not found")
         state = {
             "status": status,
             "updated_at": dt_util.utcnow().isoformat(),
@@ -414,48 +545,6 @@ class StructuralOfficeManager:
                             changed = True
         if changed:
             await self._async_save()
-        await self._async_process_accounting_reminders(now)
-
-    async def _async_process_accounting_reminders(self, now: datetime) -> None:
-        """Send payment and dunning reminders."""
-        targets = self.options[CONF_NOTIFY_TARGETS]
-        if not targets:
-            return
-        catch_up = timedelta(hours=self.options[CONF_CATCH_UP_HOURS])
-        allowed_age = catch_up if catch_up > timedelta(0) else SCHEDULER_INTERVAL
-        reminder_clock = time.fromisoformat(self.options[CONF_DEFAULT_REMINDER_TIME])
-        changed = False
-        for invoice in self.data["invoices"].values():
-            if invoice["status"] != INVOICE_STATUS_OPEN:
-                continue
-            due = date.fromisoformat(invoice["due_date"])
-            reminder_rules: list[tuple[str, int, int | None]] = [
-                ("payment", offset, None) for offset in invoice["payment_reminder_offsets"]
-            ]
-            if invoice["direction"] == DIRECTION_RECEIVABLE:
-                reminder_rules.extend(
-                    ("dunning", offset, level)
-                    for level, offset in enumerate(invoice["dunning_offsets"], start=1)
-                )
-            for kind, offset, level in reminder_rules:
-                remind_at = datetime.combine(
-                    due + timedelta(days=offset),
-                    reminder_clock,
-                    tzinfo=dt_util.DEFAULT_TIME_ZONE,
-                )
-                notification_id = f"invoice:{invoice['id']}:{invoice['due_date']}:{kind}:{offset}"
-                if notification_id in self.data["notifications"]:
-                    continue
-                age = now - remind_at
-                if remind_at <= now and age <= allowed_age:
-                    await self._async_send_accounting_notification(invoice, kind, level)
-                    self.data["notifications"][notification_id] = now.isoformat()
-                    if level is not None:
-                        invoice["dunning_level"] = max(invoice["dunning_level"], level)
-                        invoice["updated_at"] = now.isoformat()
-                    changed = True
-        if changed:
-            await self._async_save()
 
     async def _async_send_notification(
         self, topic_name: str, routine_name: str, due: date, item_id: str
@@ -466,7 +555,7 @@ class StructuralOfficeManager:
             "send_message",
             {
                 "title": f"StructuralOffice: {topic_name}",
-                "message": f"{routine_name} ist am {due.strftime('%d.%m.%Y')} fällig.",
+                "message": f"{routine_name} is due on {due.strftime('%Y-%m-%d')}.",
                 "data": {
                     "url": f"/{DOMAIN}",
                     "clickAction": f"/{DOMAIN}",
@@ -477,57 +566,18 @@ class StructuralOfficeManager:
             blocking=True,
         )
 
-    async def _async_send_accounting_notification(
-        self, invoice: dict[str, Any], kind: str, level: int | None
-    ) -> None:
-        """Send a payment or dunning reminder."""
-        if kind == "dunning":
-            title = f"Mahnstufe {level}: {invoice['invoice_number']}"
-            message = (
-                f"Die Forderung an {invoice['contact']} über "
-                f"{invoice['gross_cents'] / 100:.2f} {invoice['currency']} ist offen."
-            )
-        elif invoice["direction"] == DIRECTION_PAYABLE:
-            title = f"Zahlung fällig: {invoice['invoice_number']}"
-            message = (
-                f"Die Rechnung von {invoice['contact']} über "
-                f"{invoice['gross_cents'] / 100:.2f} {invoice['currency']} ist am "
-                f"{date.fromisoformat(invoice['due_date']).strftime('%d.%m.%Y')} fällig."
-            )
-        else:
-            title = f"Zahlungseingang prüfen: {invoice['invoice_number']}"
-            message = (
-                f"Bitte den Zahlungseingang von {invoice['contact']} über "
-                f"{invoice['gross_cents'] / 100:.2f} {invoice['currency']} prüfen."
-            )
-        await self.hass.services.async_call(
-            "notify",
-            "send_message",
-            {
-                "title": f"StructuralOffice: {title}",
-                "message": message,
-                "data": {
-                    "url": f"/{DOMAIN}",
-                    "clickAction": f"/{DOMAIN}",
-                    "tag": f"structuraloffice-invoice-{invoice['id']}",
-                },
-            },
-            target={"entity_id": self.options[CONF_NOTIFY_TARGETS]},
-            blocking=True,
-        )
-
     async def async_send_test_notification(self) -> None:
         """Send a test notification to the configured targets."""
         if not self.options[CONF_NOTIFY_TARGETS]:
             raise StructuralOfficeValidationError(
-                "Bitte zuerst ein Benachrichtigungsgerät konfigurieren"
+                "Configure a notification device first"
             )
         await self.hass.services.async_call(
             "notify",
             "send_message",
             {
                 "title": "StructuralOffice",
-                "message": "Die Pushbenachrichtigungen sind erfolgreich eingerichtet.",
+                "message": "Push notifications are configured successfully.",
             },
             target={"entity_id": self.options[CONF_NOTIFY_TARGETS]},
             blocking=True,

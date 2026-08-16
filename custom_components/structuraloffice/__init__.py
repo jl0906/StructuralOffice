@@ -10,7 +10,9 @@ from homeassistant.components import frontend, panel_custom
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
 
+from .api import async_register as async_register_api
 from .const import (
     DOMAIN,
     FRONTEND_URL,
@@ -33,12 +35,15 @@ class StructuralOfficeRuntimeData:
 
 type StructuralOfficeConfigEntry = ConfigEntry[StructuralOfficeRuntimeData]
 
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
 
 async def async_setup(hass: HomeAssistant, _config: dict[str, Any]) -> bool:
     """Set up component-level StructuralOffice resources."""
     domain_data = hass.data.setdefault(DOMAIN, {})
     if not domain_data.get("websocket_registered"):
         async_register_websocket(hass)
+        async_register_api(hass)
         domain_data["websocket_registered"] = True
     return True
 
@@ -64,8 +69,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: StructuralOfficeConfigEn
             webcomponent_name=PANEL_COMPONENT,
             sidebar_title=PANEL_TITLE,
             sidebar_icon=PANEL_ICON,
-            module_url=f"{FRONTEND_URL}?v=0.3.0",
-            require_admin=False,
+            module_url=f"{FRONTEND_URL}?v=0.4.0-alpha",
+            require_admin=True,
             config_panel_domain=DOMAIN,
             handle_safe_area=True,
         )

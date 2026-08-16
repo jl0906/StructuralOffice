@@ -7,15 +7,19 @@
       "user": {
         "data": {
           "catch_up_hours": "Catch up missed reminders (hours)",
+          "default_payment_term_days": "Default payment term (days)",
           "default_reminder_time": "Default reminder time",
           "notify_targets": "Notification devices",
+          "sepa_date_as_due_date": "Use SEPA debit date as due date",
           "company_name": "Company name",
           "company_address": "Company address",
           "company_email": "Email address"
         },
         "data_description": {
           "catch_up_hours": "How long a reminder missed during downtime may still be sent.",
-          "notify_targets": "One or more notify entities, for example your phone."
+          "default_payment_term_days": "Used for imported invoices that do not provide a due date.",
+          "notify_targets": "One or more notify entities, for example your phone.",
+          "sepa_date_as_due_date": "When enabled, a populated SEPA debit date overrides the calculated payment term."
         },
         "description": "Set up StructuralOffice and choose the devices for push notifications.",
         "title": "Set up StructuralOffice"
@@ -27,15 +31,19 @@
       "init": {
         "data": {
           "catch_up_hours": "Catch up missed reminders (hours)",
+          "default_payment_term_days": "Default payment term (days)",
           "default_reminder_time": "Default reminder time",
           "notify_targets": "Notification devices",
+          "sepa_date_as_due_date": "Use SEPA debit date as due date",
           "company_name": "Company name",
           "company_address": "Company address",
           "company_email": "Email address"
         },
         "data_description": {
           "catch_up_hours": "Set to 0 to disable catch-up.",
-          "notify_targets": "These targets receive StructuralOffice reminders."
+          "default_payment_term_days": "New CSV imports use this value; existing due dates remain unchanged.",
+          "notify_targets": "These targets receive StructuralOffice reminders.",
+          "sepa_date_as_due_date": "When enabled, a populated SEPA debit date overrides the calculated payment term."
         },
         "title": "StructuralOffice settings"
       }

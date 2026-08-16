@@ -124,6 +124,10 @@ class StructuralOfficePanel extends HTMLElement {
       .bar.out { background:#f59e0b; } .month-label { position:absolute; bottom:0; font-size:10px; color:var(--secondary-text-color); }
       .legend { display:flex; gap:16px; color:var(--secondary-text-color); font-size:12px; margin:10px; } .dot { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:5px; background:#0f766e; } .dot.out { background:#f59e0b; }
       .role-row { display:grid; grid-template-columns:1fr 180px; gap:12px; align-items:center; width:100%; }
+      .readonly [data-new-topic], .readonly [data-new-routine], .readonly [data-new-invoice],
+      .readonly [data-edit-topic], .readonly [data-edit-routine], .readonly [data-edit-invoice],
+      .readonly [data-delete-topic], .readonly [data-delete-routine], .readonly [data-delete-invoice],
+      .readonly [data-status], .readonly [data-pay-invoice], .readonly [data-import] { display:none; }
       @media(max-width:800px){ .cards{grid-template-columns:1fr 1fr}.card{align-items:flex-start;flex-direction:column}.actions{width:100%;justify-content:flex-end}.row{grid-template-columns:1fr} header{align-items:flex-start}.shell{padding-top:16px} }
     `;
 
@@ -138,7 +142,7 @@ class StructuralOfficePanel extends HTMLElement {
       if (this._tab === "settings") body = this.settingsTemplate();
     }
 
-    this.shadowRoot.innerHTML = `<style>${style}</style><div class="shell">
+    this.shadowRoot.innerHTML = `<style>${style}</style><div class="shell ${this._data?.access === "viewer" ? "readonly" : ""}">
       <header><div class="brand"><div class="logo"><ha-icon icon="mdi:office-building-cog"></ha-icon></div><div><h1>StructuralOffice</h1><div class="subtitle">Strukturelle Abläufe verlässlich im Blick</div></div></div></header>
       <nav>${this.navButton("dashboard", "mdi:view-dashboard-outline", "Übersicht")}${this.navButton("topics", "mdi:shape-outline", "Topics")}${this.navButton("routines", "mdi:calendar-sync", "Routinen")}${this.navButton("accounting", "mdi:calculator-variant-outline", "Buchhaltung")}${this.navButton("analytics", "mdi:chart-bar", "Auswertungen")}${this.navButton("settings", "mdi:cog-outline", "Einstellungen")}</nav>
       ${this._error ? `<div class="error">${this.h(this._error)}</div>` : ""}${body}${this.modalTemplate()}

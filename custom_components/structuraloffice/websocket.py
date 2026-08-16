@@ -97,7 +97,11 @@ async def ws_set_user_role(hass, connection, msg) -> None:
 
 def _write_command(command_type: str, key: str, handler):
     """Build a role-protected mutation command."""
-    schema = {vol.Required("type"): f"{DOMAIN}/{command_type}", vol.Required(key): dict if key in {"topic", "routine", "invoice"} else str}
+    value_type = dict if key in {"topic", "routine", "invoice"} else str
+    schema = {
+        vol.Required("type"): f"{DOMAIN}/{command_type}",
+        vol.Required(key): value_type,
+    }
 
     @websocket_api.async_response
     @websocket_api.websocket_command(schema)
@@ -209,7 +213,11 @@ async def ws_export_invoices(hass, connection, msg) -> None:
             load_template_xlsx if msg["empty"] else export_invoices_xlsx,
             *([] if msg["empty"] else [invoices]),
         )
-        filename = "StructuralOffice-Buchhaltung-Vorlage.xlsx" if msg["empty"] else "StructuralOffice-Buchhaltung.xlsx"
+        filename = (
+            "StructuralOffice-Buchhaltung-Vorlage.xlsx"
+            if msg["empty"]
+            else "StructuralOffice-Buchhaltung.xlsx"
+        )
         connection.send_result(msg["id"], _download(content, filename))
     except StructuralOfficeValidationError as err:
         _error(connection, msg, err)
@@ -231,7 +239,9 @@ async def ws_export_invoices_csv(hass, connection, msg) -> None:
 @websocket_api.websocket_command(
     {vol.Required("type"): f"{DOMAIN}/generate_invoice_pdf",
      vol.Required("invoice_id"): str,
-     vol.Required("document_type"): vol.In(["payment_reminder", "dunning_1", "dunning_2", "dunning_3"])}
+     vol.Required("document_type"): vol.In(
+         ["payment_reminder", "dunning_1", "dunning_2", "dunning_3"]
+     )}
 )
 async def ws_generate_invoice_pdf(hass, connection, msg) -> None:
     try:
@@ -249,7 +259,10 @@ async def ws_generate_invoice_pdf(hass, connection, msg) -> None:
         content = await hass.async_add_executor_job(
             build_invoice_pdf, invoice, company, msg["document_type"]
         )
-        safe_number = "".join(char if char.isalnum() or char in "-_" else "-" for char in invoice["invoice_number"])
+        safe_number = "".join(
+            char if char.isalnum() or char in "-_" else "-"
+            for char in invoice["invoice_number"]
+        )
         connection.send_result(msg["id"], _download(content, f"Mahndokument-{safe_number}.pdf"))
     except StructuralOfficeValidationError as err:
         _error(connection, msg, err)

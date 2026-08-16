@@ -68,21 +68,6 @@ Für offene Ausgangsrechnungen erzeugt StructuralOffice Zahlungserinnerungen sow
 - **Bearbeiter:** Topics, Routinen, Aufgaben und Buchhaltung bearbeiten; Mahn-PDFs erzeugen
 - **Betrachter:** Daten und Auswertungen lesen; Excel und CSV exportieren
 
-## Entwicklung
-
-Die Integration liegt vollständig in `custom_components/structuraloffice`, wie von HACS gefordert. Das Frontend benötigt keinen CDN-Zugriff und keinen separaten Build-Schritt.
-
-Repository: [github.com/jl0906/StructuralOffice](https://github.com/jl0906/StructuralOffice)
-
-Empfohlene Prüfungen:
-
-```bash
-python -m pytest
-python -m ruff check custom_components tests
-python -m compileall custom_components
-node --check custom_components/structuraloffice/frontend/structuraloffice-panel.js
-```
-
 ## Datenschutz
 
 StructuralOffice überträgt keine Daten an einen eigenen Cloud-Dienst. Topics, Routinen, Aufgabenstatus und der Benachrichtigungsverlauf liegen im lokalen Home-Assistant-Speicher und werden von Home-Assistant-Backups erfasst.

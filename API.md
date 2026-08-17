@@ -1,7 +1,7 @@
 # StructuralOffice API
 
 This document describes the beta API contract implemented by StructuralOffice
-`0.9.2-beta`. The contract may change before `1.0.0`. A machine-readable contract is
+`1.0.0-rc1`. The feature set and versioned API are frozen for final validation. A machine-readable contract is
 available in [OPENAPI.yaml](OPENAPI.yaml).
 
 ## Connection and authorization
@@ -256,9 +256,11 @@ PATCH /api/structuraloffice/v1/tasks/<task-id>
 }
 ```
 
-Mutable task fields are `status`, `priority`, `due_at`, `estimated_minutes`, and
-`completion_note`. Checklist
-items are independently revisioned:
+Mutable fields for every task are `status`, `priority`, `due_at`, `estimated_minutes`,
+and `completion_note`. Manual tasks additionally accept `title`, `description`,
+`category`, and an atomic replacement `checklist`. Generated task source text and
+checklist structure stay linked to their workflow. Generated checklist items are
+independently revisioned:
 
 ```http
 PATCH /api/structuraloffice/v1/tasks/<task-id>/checklist/<item-id>
@@ -274,6 +276,22 @@ PATCH /api/structuraloffice/v1/tasks/<task-id>/checklist/<item-id>
 
 Task and checklist writes emit persistent change events and audit metadata. Stale writes
 return HTTP 409 with the current task or checklist item.
+
+Cancel several active tasks in one transaction:
+
+```http
+POST /api/structuraloffice/v1/tasks/bulk-cancel
+
+{
+  "tasks": [
+    {"id": "task-a", "expected_revision": 2},
+    {"id": "task-b", "expected_revision": 5}
+  ]
+}
+```
+
+The request accepts 1 to 500 tasks. If one task is missing, inactive, or stale, no task
+is changed. Cancellation keeps the audit history and exact accounting membership.
 
 ## Payment-reminder to dunning transition
 
@@ -294,8 +312,8 @@ POST /api/structuraloffice/v1/tasks/<task-id>/schedule-dunning
 }
 ```
 
-The transaction completes the payment-reminder task and creates one linked
-`Write dunning notice <invoice-range>` task due at 09:00 on the selected date. Only
+The transaction completes the payment-reminder package and creates one linked dunning
+package due at 09:00 on the selected date. Only
 invoices still open at that moment are copied into the dunning task. Calling the
 transition twice is rejected.
 

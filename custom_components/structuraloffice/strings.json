@@ -20,7 +20,7 @@
           "catch_up_hours": "How long a reminder missed during downtime may still be sent.",
           "default_payment_term_days": "Used for imported invoices that do not provide a due date.",
           "notify_targets": "One or more notify entities, for example your phone.",
-          "payment_reminder_estimated_minutes": "Duration assigned to each new grouped invoice-range task.",
+          "payment_reminder_estimated_minutes": "Duration assigned to each consolidated invoice follow-up package.",
           "sepa_date_as_due_date": "When enabled, a populated SEPA debit date overrides the calculated payment term."
         },
         "description": "Set up StructuralOffice and choose the devices for push notifications.",

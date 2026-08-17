@@ -5,7 +5,7 @@ invoice due-date monitoring. The operational desktop interface is being moved to
 separate Windows application. Home Assistant now provides database health statistics
 and managed backup controls only.
 
-## Version 0.9.2-beta
+## Version 1.0.0-rc1
 
 This release adds private per-user storage while retaining the main backend task
 lifecycle and the contract needed by the Windows client:
@@ -150,6 +150,7 @@ in [API.md](API.md) and [OPENAPI.yaml](OPENAPI.yaml).
 | `GET` | `/api/structuraloffice/v1/tasks` | Materialized recurring and accounting tasks |
 | `POST` | `/api/structuraloffice/v1/tasks` | Create a standalone task |
 | `GET/PATCH` | `/api/structuraloffice/v1/tasks/{id}` | Read or revision-protected update of a task |
+| `POST` | `/api/structuraloffice/v1/tasks/bulk-cancel` | Atomically cancel several active tasks |
 | `POST` | `/api/structuraloffice/v1/tasks/{id}/schedule-dunning` | Complete a payment reminder and schedule its dunning follow-up |
 | `POST` | `/api/structuraloffice/v1/tasks/{id}/confirm-settled` | Confirm detected settlement and complete an invoice task |
 | `PATCH` | `/api/structuraloffice/v1/tasks/{id}/checklist/{item_id}` | Revision-protected checklist update |

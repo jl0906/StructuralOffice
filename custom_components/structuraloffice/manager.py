@@ -615,6 +615,26 @@ class StructuralOfficeManager:
         self._fire_task_event(task_id, "updated", result["revision"])
         return result
 
+    async def async_cancel_materialized_tasks(
+        self,
+        tasks: list[dict[str, Any]],
+        user_id: str,
+        user_name: str,
+    ) -> dict[str, Any]:
+        """Cancel several selected tasks in one database transaction."""
+        result = await self.hass.async_add_executor_job(
+            self.database.cancel_materialized_tasks,
+            tasks,
+            user_id,
+            user_name,
+        )
+        for task_id in result["cancelled"]:
+            self._fire_task_event(
+                task_id, "cancelled", int(result["revisions"][task_id])
+            )
+        await self._async_refresh_database_stats()
+        return result
+
     async def async_update_task_checklist_item(
         self,
         task_id: str,

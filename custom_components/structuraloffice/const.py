@@ -4,7 +4,7 @@ from datetime import timedelta
 
 DOMAIN = "structuraloffice"
 NAME = "StructuralOffice"
-INTEGRATION_VERSION = "0.9.2-beta"
+INTEGRATION_VERSION = "1.0.0-rc1"
 
 PLATFORMS = ["sensor"]
 

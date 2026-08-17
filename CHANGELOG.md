@@ -5,6 +5,27 @@ All notable changes to StructuralOffice are documented in this file. The format 
 
 ## [Unreleased]
 
+## [1.0.0-rc1] - 2026-08-17
+
+### Added
+
+- Atomic, revision-protected bulk cancellation for up to 500 active tasks.
+- Full manual-task editing of title, description, category, scheduling, status, and
+  checklist through the versioned task API.
+
+### Changed
+
+- Automatic invoice follow-up is consolidated into one active work package per workflow
+  stage and currency; exact invoice membership remains internal to the package.
+- Generated accounting task titles now describe the work, invoice count, and currency
+  instead of exposing long invoice-number ranges.
+- The frontend cache and integration version are now `1.0.0-rc1`.
+
+### Security
+
+- Bulk cancellation is transactionally isolated to the authenticated user's private
+  database and rejects the entire request on any stale or invalid item.
+
 ## [0.9.2-beta] - 2026-08-17
 
 ### Added
@@ -306,7 +327,8 @@ All notable changes to StructuralOffice are documented in this file. The format 
 - Push notifications to selected `notify` entities
 - Task states, sensors, calendar support, and local storage
 
-[Unreleased]: https://github.com/jl0906/StructuralOffice/compare/v0.9.2-beta...HEAD
+[Unreleased]: https://github.com/jl0906/StructuralOffice/compare/v1.0.0-rc1...HEAD
+[1.0.0-rc1]: https://github.com/jl0906/StructuralOffice/compare/v0.9.2-beta...v1.0.0-rc1
 [0.9.2-beta]: https://github.com/jl0906/StructuralOffice/compare/v0.9.1-beta...v0.9.2-beta
 [0.9.1-beta]: https://github.com/jl0906/StructuralOffice/compare/v0.9.0-beta...v0.9.1-beta
 [0.9.0-beta]: https://github.com/jl0906/StructuralOffice/compare/v0.7.1-alpha...v0.9.0-beta

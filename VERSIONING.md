@@ -5,10 +5,10 @@ prereleases while the integration and Windows application are under development.
 
 ## Current status
 
-`0.9.2-beta`
+`1.0.0-rc1`
 
-This version is intended for development and testing. It does not guarantee a stable
-database schema or a permanently compatible API.
+This release candidate freezes the planned 1.0 feature set and API. It is intended for
+final migration, upgrade, and real-world validation before the stable release.
 
 ## Release stages
 

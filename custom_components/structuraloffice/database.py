@@ -1418,7 +1418,7 @@ class StructuralOfficeDatabase:
         force: bool = False,
         estimated_minutes: int = 10,
     ) -> dict[str, Any]:
-        """Create or refresh one invoice-range task per currency and escalation rule."""
+        """Create or refresh one coherent work package per stage and currency."""
         evaluated = date.fromisoformat(evaluation_date)
         created = 0
         updated = 0
@@ -1715,7 +1715,7 @@ class StructuralOfficeDatabase:
                 "category": "Accounting",
                 "currency": batch[8],
                 "description": (
-                    f"{batch[6]} overdue open invoice(s) in range {invoice_range}."
+                    f"{batch[6]} overdue open invoice(s) · {invoice_range} · {batch[8]}."
                 ),
                 "estimated_minutes": batch[9],
                 "escalation_level": batch[1],
@@ -1723,6 +1723,7 @@ class StructuralOfficeDatabase:
                 "invoice_count_initial": batch[5],
                 "invoice_count_open": batch[6],
                 "invoice_range": invoice_range,
+                "grouping_key": f"{batch[0]}:{batch[8]}",
                 "last_invoice_number": last_invoice_number,
                 "outstanding_cents": batch[7],
                 "parent_batch_id": batch[12],
@@ -1734,9 +1735,9 @@ class StructuralOfficeDatabase:
                 "source_due_date": batch[2],
                 "task_type": batch[0],
                 "topic_name": (
-                    f"Write dunning notice {invoice_range}"
+                    f"Process dunning notices · {batch[6]} invoices · {batch[8]}"
                     if batch[0] == "dunning"
-                    else f"Write payment reminders {invoice_range}"
+                    else f"Process payment reminders · {batch[6]} invoices · {batch[8]}"
                 ),
             },
             ensure_ascii=False,
@@ -2262,12 +2263,16 @@ class StructuralOfficeDatabase:
         user_id: str,
         user_name: str,
     ) -> dict[str, Any]:
-        """Update task state and scheduling with optimistic concurrency control."""
-        allowed = {"completion_note", "due_at", "estimated_minutes", "priority", "status"}
+        """Update task state, scheduling, and editable manual-task content."""
+        common_allowed = {
+            "completion_note", "due_at", "estimated_minutes", "priority", "status"
+        }
+        manual_allowed = {"category", "checklist", "description", "title"}
+        allowed = common_allowed | manual_allowed
         if not changes or (unknown := set(changes) - allowed):
             detail = f": {', '.join(sorted(unknown))}" if changes and unknown else ""
             raise StructuralOfficeValidationError(f"Unsupported or empty task update{detail}")
-        normalized = dict(changes)
+        normalized = {key: value for key, value in changes.items() if key in common_allowed}
         if "status" in normalized:
             normalized["status"] = str(normalized["status"])
             if normalized["status"] not in VALID_STATUSES - {"auto_completed"}:
@@ -2295,7 +2300,7 @@ class StructuralOfficeDatabase:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT revision, source_type, source_id, status, started_at, "
-                "completed_at, completed_by "
+                "completed_at, completed_by, topic_snapshot "
                 "FROM task_occurrences WHERE id = ? AND archived_at IS NULL",
                 (task_id,),
             ).fetchone()
@@ -2303,6 +2308,35 @@ class StructuralOfficeDatabase:
                 raise StructuralOfficeValidationError("Task was not found")
             if row[0] != expected_revision:
                 raise StructuralOfficeConflictError(self.get_materialized_task(task_id))
+            manual_changes = set(changes) & manual_allowed
+            if manual_changes and row[1] != "manual":
+                raise StructuralOfficeValidationError(
+                    "Generated tasks do not allow title, description, category, "
+                    "or checklist changes"
+                )
+            if row[1] == "manual" and manual_changes - {"checklist"}:
+                snapshot = json.loads(row[7])
+                if "title" in changes:
+                    title = str(changes["title"] or "").strip()
+                    if not title:
+                        raise StructuralOfficeValidationError("Task title is required")
+                    snapshot["topic_name"] = title[:500]
+                if "description" in changes:
+                    snapshot["description"] = str(changes["description"] or "")[:5000]
+                if "category" in changes:
+                    snapshot["category"] = str(changes["category"] or "")[:500]
+                normalized["topic_snapshot"] = json.dumps(
+                    snapshot, ensure_ascii=False, separators=(",", ":")
+                )
+            checklist = changes.get("checklist")
+            if "checklist" in changes:
+                if not isinstance(checklist, list) or len(checklist) > 100:
+                    raise StructuralOfficeValidationError("Task checklist is invalid")
+                for raw_item in checklist:
+                    if not isinstance(raw_item, dict) or not str(
+                        raw_item.get("title") or ""
+                    ).strip():
+                        raise StructuralOfficeValidationError("Checklist title is required")
             status = normalized.get("status", row[3])
             if row[1] == "accounting_due_batch" and status == "completed":
                 batch_state = connection.execute(
@@ -2348,6 +2382,28 @@ class StructuralOfficeDatabase:
             connection.execute(
                 f"UPDATE task_occurrences SET {', '.join(assignments)} WHERE id = ?", values
             )
+            if "checklist" in changes:
+                connection.execute(
+                    "DELETE FROM task_checklist_items WHERE task_id = ?", (task_id,)
+                )
+                for position, raw_item in enumerate(checklist):
+                    completed = bool(raw_item.get("completed", False))
+                    connection.execute(
+                        "INSERT INTO task_checklist_items(id, task_id, position, "
+                        "title_snapshot, required, completed, completed_at, completed_by, "
+                        "note) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            f"{task_id}:{position}",
+                            task_id,
+                            position,
+                            str(raw_item.get("title") or "").strip()[:500],
+                            int(bool(raw_item.get("required", True))),
+                            int(completed),
+                            timestamp if completed else None,
+                            user_id if completed else None,
+                            str(raw_item.get("note") or "")[:5000],
+                        ),
+                    )
             if row[1] == "accounting_due_batch" and row[2]:
                 batch_updates: dict[str, Any] = {}
                 if "status" in normalized:
@@ -2367,9 +2423,86 @@ class StructuralOfficeDatabase:
             ).fetchone()[0]
             self._record_change(
                 connection, "tasks", task_id, "updated", current, user_id, user_name,
-                sorted(normalized), normalized, timestamp,
+                sorted(changes), changes, timestamp,
             )
         return self.get_materialized_task(task_id)
+
+    def cancel_materialized_tasks(
+        self,
+        tasks: list[dict[str, Any]],
+        user_id: str,
+        user_name: str,
+    ) -> dict[str, Any]:
+        """Cancel several active tasks atomically while retaining their history."""
+        if not isinstance(tasks, list) or not 1 <= len(tasks) <= 500:
+            raise StructuralOfficeValidationError("Select between 1 and 500 tasks")
+        requested: list[tuple[str, int]] = []
+        seen: set[str] = set()
+        for item in tasks:
+            if not isinstance(item, dict):
+                raise StructuralOfficeValidationError("Invalid task selection")
+            task_id = str(item.get("id") or "")
+            if not task_id or task_id in seen:
+                raise StructuralOfficeValidationError("Task selection contains invalid IDs")
+            seen.add(task_id)
+            requested.append((task_id, int(item.get("expected_revision", -1))))
+
+        timestamp = datetime.now(UTC).isoformat()
+        cancelled: list[str] = []
+        revisions: dict[str, int] = {}
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows: dict[str, tuple[Any, ...]] = {}
+            for task_id, expected_revision in requested:
+                row = connection.execute(
+                    "SELECT revision, source_type, source_id, status FROM task_occurrences "
+                    "WHERE id = ? AND archived_at IS NULL",
+                    (task_id,),
+                ).fetchone()
+                if row is None:
+                    raise StructuralOfficeValidationError(f"Task was not found: {task_id}")
+                if row[0] != expected_revision:
+                    raise StructuralOfficeConflictError(
+                        {"id": task_id, "revision": row[0], "status": row[3]}
+                    )
+                if row[3] not in {"open", "in_progress"}:
+                    raise StructuralOfficeValidationError(
+                        f"Only active tasks can be removed: {task_id}"
+                    )
+                rows[task_id] = row
+
+            for task_id, _expected_revision in requested:
+                row = rows[task_id]
+                connection.execute(
+                    "UPDATE task_occurrences SET status = 'cancelled', completed_at = ?, "
+                    "completed_by = ?, updated_at = ?, revision = revision + 1 WHERE id = ?",
+                    (timestamp, user_id, timestamp, task_id),
+                )
+                if row[1] == "accounting_due_batch" and row[2]:
+                    connection.execute(
+                        "UPDATE accounting_task_batches SET status = 'cancelled', "
+                        "completed_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ?",
+                        (timestamp, timestamp, row[2]),
+                    )
+                self._record_change(
+                    connection,
+                    "tasks",
+                    task_id,
+                    "cancelled",
+                    row[0] + 1,
+                    user_id,
+                    user_name,
+                    ["status"],
+                    {"status": "cancelled"},
+                    timestamp,
+                )
+                cancelled.append(task_id)
+                revisions[task_id] = row[0] + 1
+        return {
+            "cancelled": cancelled,
+            "count": len(cancelled),
+            "revisions": revisions,
+        }
 
     def update_task_checklist_item(
         self,

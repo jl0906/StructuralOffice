@@ -381,6 +381,31 @@ class StructuralOfficeTodayDashboardView(HomeAssistantView):
         return self.json(await _manager(request).async_today_dashboard())
 
 
+class StructuralOfficeBulkCancelTasksView(HomeAssistantView):
+    """Cancel several selected tasks atomically."""
+
+    url = f"{API_PREFIX}/tasks/bulk-cancel"
+    name = f"api:{DOMAIN}:v1:tasks-bulk-cancel"
+
+    async def post(self, request: web.Request) -> web.Response:
+        _role(request, write=True)
+        try:
+            payload = await request.json()
+            user_id, user_name = _identity(request)
+            return self.json(
+                await _manager(request).async_cancel_materialized_tasks(
+                    payload.get("tasks", []), user_id, user_name
+                )
+            )
+        except StructuralOfficeConflictError as err:
+            return self.json(
+                {"code": "revision_conflict", "current": err.current, "error": str(err)},
+                status_code=409,
+            )
+        except (StructuralOfficeValidationError, TypeError, ValueError) as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+
 class StructuralOfficeTaskView(HomeAssistantView):
     """Read or update one persisted task."""
 
@@ -817,6 +842,7 @@ def async_register(hass: HomeAssistant) -> None:
         StructuralOfficeRolesView,
         StructuralOfficeTasksView,
         StructuralOfficeTodayDashboardView,
+        StructuralOfficeBulkCancelTasksView,
         StructuralOfficeTaskView,
         StructuralOfficeScheduleDunningView,
         StructuralOfficeConfirmSettlementView,

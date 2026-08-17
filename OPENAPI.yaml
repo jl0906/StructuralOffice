@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: StructuralOffice API
-  version: 0.7.0-alpha
+  version: 0.7.1-alpha
   description: Backend API for the separately developed StructuralOffice Windows client.
 servers:
   - url: /api/structuraloffice/v1

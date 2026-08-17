@@ -69,7 +69,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: StructuralOfficeConfigEn
             webcomponent_name=PANEL_COMPONENT,
             sidebar_title=PANEL_TITLE,
             sidebar_icon=PANEL_ICON,
-            module_url=f"{FRONTEND_URL}?v=0.7.0-alpha",
+            module_url=f"{FRONTEND_URL}?v=0.7.1-alpha",
             require_admin=True,
             config_panel_domain=DOMAIN,
             handle_safe_area=True,

@@ -5,7 +5,7 @@ invoice due-date monitoring. The operational desktop interface is being moved to
 separate Windows application. Home Assistant now provides database health statistics
 and managed backup controls only.
 
-## Version 0.7.0-alpha
+## Version 0.7.1-alpha
 
 This release completes the main backend task lifecycle and stabilizes the contract needed
 to start the Windows-client beta work:

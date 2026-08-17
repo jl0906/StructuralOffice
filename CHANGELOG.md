@@ -5,6 +5,13 @@ All notable changes to StructuralOffice are documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.7.1-alpha] - 2026-08-17
+
+### Changed
+
+- Open overdue invoices are grouped into one accounting task per escalation rule and
+  currency. Task snapshots expose the first and last invoice number as a range.
+
 ## [0.7.0-alpha] - 2026-08-16
 
 ### Added
@@ -223,7 +230,8 @@ All notable changes to StructuralOffice are documented in this file. The format 
 - Push notifications to selected `notify` entities
 - Task states, sensors, calendar support, and local storage
 
-[Unreleased]: https://github.com/jl0906/StructuralOffice/compare/v0.7.0-alpha...HEAD
+[Unreleased]: https://github.com/jl0906/StructuralOffice/compare/v0.7.1-alpha...HEAD
+[0.7.1-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.7.0-alpha...v0.7.1-alpha
 [0.7.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.6.0-alpha...v0.7.0-alpha
 [0.6.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.5.0-alpha...v0.6.0-alpha
 [0.5.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.4.0-alpha...v0.5.0-alpha

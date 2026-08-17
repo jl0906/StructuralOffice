@@ -300,7 +300,7 @@ class StructuralOfficeDatabase:
                     escalation_level INTEGER NOT NULL,
                     days_after_due INTEGER NOT NULL,
                     evaluation_time TEXT NOT NULL,
-                    group_by TEXT NOT NULL DEFAULT 'due_date',
+                    group_by TEXT NOT NULL DEFAULT 'invoice_range',
                     minimum_open_invoices INTEGER NOT NULL DEFAULT 1,
                     maximum_invoices_per_batch INTEGER NOT NULL DEFAULT 1000,
                     auto_complete_empty_batches INTEGER NOT NULL DEFAULT 1,
@@ -405,9 +405,13 @@ class StructuralOfficeDatabase:
             "id, task_type, escalation_level, days_after_due, evaluation_time, "
             "group_by, minimum_open_invoices, maximum_invoices_per_batch, "
             "auto_complete_empty_batches, notify_enabled, enabled, revision, "
-            "created_at, updated_at) VALUES(?, ?, ?, ?, '09:00', 'due_date', "
+            "created_at, updated_at) VALUES(?, ?, ?, ?, '09:00', 'invoice_range', "
             "1, 1000, 1, 1, 1, 1, ?, ?)",
             ((*item, timestamp, timestamp) for item in defaults),
+        )
+        connection.execute(
+            "UPDATE accounting_escalation_rules SET group_by = 'invoice_range' "
+            "WHERE group_by = 'due_date'"
         )
 
     def _sync_all_projections(self, connection: sqlite3.Connection) -> None:
@@ -1334,7 +1338,7 @@ class StructuralOfficeDatabase:
         evaluation_time: str,
         force: bool = False,
     ) -> dict[str, Any]:
-        """Create or refresh one grouped task per due date, currency, and rule."""
+        """Create or refresh one invoice-range task per currency and escalation rule."""
         evaluated = date.fromisoformat(evaluation_date)
         created = 0
         updated = 0
@@ -1362,23 +1366,29 @@ class StructuralOfficeDatabase:
                 processed_rule_ids.add(rule[0])
                 cutoff = (evaluated - timedelta(days=rule[3])).isoformat()
                 invoices = connection.execute(
-                    "SELECT id, due_date, currency, outstanding_cents FROM accounting_invoices "
+                    "SELECT id, due_date, currency, outstanding_cents, invoice_number "
+                    "FROM accounting_invoices "
                     "WHERE status = 'open' AND outstanding_cents > 0 AND archived_at IS NULL "
                     "AND due_date <= ? ORDER BY due_date, currency, invoice_number",
                     (cutoff,),
                 ).fetchall()
-                groups: dict[tuple[str, str], list[tuple[Any, ...]]] = {}
+                groups: dict[str, list[tuple[Any, ...]]] = {}
                 for invoice in invoices:
-                    groups.setdefault((invoice[1], invoice[2]), []).append(invoice)
-                for (due_date, currency), members in groups.items():
+                    groups.setdefault(invoice[2], []).append(invoice)
+                for currency, members in groups.items():
                     if len(members) < rule[5]:
                         continue
-                    dedupe = f"{rule[1]}:{rule[2]}:{due_date}:{currency}"
-                    batch = connection.execute(
+                    source_due_date = min(item[1] for item in members)
+                    dedupe = f"{rule[1]}:{rule[2]}:overdue:{currency}"
+                    batches = connection.execute(
                         "SELECT id, invoice_count_initial, revision, status FROM "
-                        "accounting_task_batches WHERE deduplication_key = ?",
-                        (dedupe,),
-                    ).fetchone()
+                        "accounting_task_batches WHERE rule_id = ? AND currency = ? "
+                        "AND status IN ('open', 'in_progress') "
+                        "ORDER BY CASE WHEN deduplication_key = ? THEN 0 ELSE 1 END, "
+                        "created_at, id",
+                        (rule[0], currency, dedupe),
+                    ).fetchall()
+                    batch = batches[0] if batches else None
                     if batch is None:
                         batch_id = uuid4().hex
                         connection.execute(
@@ -1392,7 +1402,7 @@ class StructuralOfficeDatabase:
                                 batch_id,
                                 rule[1],
                                 rule[2],
-                                due_date,
+                                source_due_date,
                                 currency,
                                 evaluation_date,
                                 f"{evaluation_date}T{rule[4]}:00",
@@ -1410,18 +1420,31 @@ class StructuralOfficeDatabase:
                     else:
                         batch_id = batch[0]
                         connection.execute(
-                            "UPDATE accounting_task_batches SET evaluation_date = ?, "
-                            "updated_at = ?, revision = revision + 1 WHERE id = ?",
+                            "UPDATE accounting_task_batches SET source_due_date = ?, "
+                            "evaluation_date = ?, invoice_count_initial = MAX(invoice_count_initial, ?), "
+                            "deduplication_key = ?, updated_at = ?, revision = revision + 1 "
+                            "WHERE id = ?",
                             (
+                                source_due_date,
                                 evaluation_date,
+                                len(members),
+                                dedupe,
                                 timestamp,
                                 batch_id,
                             ),
                         )
                         updated += 1
+                        for duplicate in batches[1:]:
+                            connection.execute(
+                                "DELETE FROM accounting_task_invoices WHERE task_id = ?",
+                                (duplicate[0],),
+                            )
+                            self._refresh_accounting_batch(
+                                connection, duplicate[0], timestamp, True
+                            )
                     touched.append(batch_id)
                     current_ids = {item[0] for item in members}
-                    for invoice_id, _due, _currency, outstanding in members:
+                    for invoice_id, _due, _currency, outstanding, _number in members:
                         connection.execute(
                             """INSERT INTO accounting_task_invoices(
                                 task_id, invoice_id, outstanding_cents_at_creation,
@@ -1552,17 +1575,45 @@ class StructuralOfficeDatabase:
             "FROM accounting_task_batches WHERE id = ?",
             (batch_id,),
         ).fetchone()
+        invoice_numbers = [
+            row[0]
+            for row in connection.execute(
+                "SELECT invoice.invoice_number FROM accounting_task_invoices AS link "
+                "JOIN accounting_invoices AS invoice ON invoice.id = link.invoice_id "
+                "WHERE link.task_id = ? AND invoice.status = 'open' "
+                "AND invoice.outstanding_cents > 0 ORDER BY invoice.invoice_number",
+                (batch_id,),
+            ).fetchall()
+        ]
+        first_invoice_number = invoice_numbers[0] if invoice_numbers else None
+        last_invoice_number = invoice_numbers[-1] if invoice_numbers else None
+        invoice_range = (
+            first_invoice_number
+            if first_invoice_number == last_invoice_number
+            else f"{first_invoice_number}–{last_invoice_number}"
+            if first_invoice_number and last_invoice_number
+            else ""
+        )
         task_id = f"accounting:{batch_id}"
         snapshot = json.dumps(
             {
+                "category": "Accounting",
                 "currency": batch[8],
+                "description": (
+                    f"{batch[6]} overdue open invoice(s) in range {invoice_range}."
+                ),
                 "escalation_level": batch[1],
+                "first_invoice_number": first_invoice_number,
                 "invoice_count_initial": batch[5],
                 "invoice_count_open": batch[6],
+                "invoice_range": invoice_range,
+                "last_invoice_number": last_invoice_number,
                 "outstanding_cents": batch[7],
                 "source_due_date": batch[2],
                 "task_type": batch[0],
+                "topic_name": f"Overdue invoices {invoice_range}",
             },
+            ensure_ascii=False,
             separators=(",", ":"),
         )
         connection.execute(

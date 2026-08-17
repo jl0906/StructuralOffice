@@ -1,7 +1,7 @@
 # StructuralOffice API
 
 This document describes the alpha API contract implemented by StructuralOffice
-`0.7.0-alpha`. The contract may change before `1.0.0`. A machine-readable contract is
+`0.7.1-alpha`. The contract may change before `1.0.0`. A machine-readable contract is
 available in [OPENAPI.yaml](OPENAPI.yaml).
 
 ## Connection and authorization

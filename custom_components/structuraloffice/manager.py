@@ -903,7 +903,7 @@ class StructuralOfficeManager:
         return {
             "backups": list(self.backups),
             "database": dict(self.database_stats),
-            "version": "0.7.0-alpha",
+            "version": "0.7.1-alpha",
         }
 
     async def async_set_occurrence_status(self, item_id: str, status: str) -> dict[str, Any]:

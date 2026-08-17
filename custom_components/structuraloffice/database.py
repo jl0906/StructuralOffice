@@ -332,6 +332,9 @@ class StructuralOfficeDatabase:
                     rule_id TEXT REFERENCES accounting_escalation_rules(id),
                     deduplication_key TEXT NOT NULL UNIQUE,
                     membership_fingerprint TEXT NOT NULL DEFAULT '',
+                    parent_batch_id TEXT UNIQUE REFERENCES accounting_task_batches(id),
+                    settlement_confirmation_required INTEGER NOT NULL DEFAULT 0,
+                    settlement_detected_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     completed_at TEXT,
@@ -404,9 +407,26 @@ class StructuralOfficeDatabase:
                     "ALTER TABLE accounting_task_batches ADD COLUMN "
                     "membership_fingerprint TEXT NOT NULL DEFAULT ''"
                 )
+            if "parent_batch_id" not in batch_columns:
+                connection.execute(
+                    "ALTER TABLE accounting_task_batches ADD COLUMN parent_batch_id TEXT"
+                )
+            if "settlement_confirmation_required" not in batch_columns:
+                connection.execute(
+                    "ALTER TABLE accounting_task_batches ADD COLUMN "
+                    "settlement_confirmation_required INTEGER NOT NULL DEFAULT 0"
+                )
+            if "settlement_detected_at" not in batch_columns:
+                connection.execute(
+                    "ALTER TABLE accounting_task_batches ADD COLUMN settlement_detected_at TEXT"
+                )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS accounting_task_membership_idx ON "
                 "accounting_task_batches(rule_id, currency, membership_fingerprint)"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS accounting_task_parent_idx ON "
+                "accounting_task_batches(parent_batch_id) WHERE parent_batch_id IS NOT NULL"
             )
             self._insert_default_escalation_rules(connection, now)
             self._sync_all_projections(connection)
@@ -1402,7 +1422,7 @@ class StructuralOfficeDatabase:
         evaluated = date.fromisoformat(evaluation_date)
         created = 0
         updated = 0
-        completed = 0
+        confirmation_required = 0
         notifiable_created = 0
         if not 1 <= estimated_minutes <= 1440:
             raise StructuralOfficeValidationError(
@@ -1433,7 +1453,13 @@ class StructuralOfficeDatabase:
                     "SELECT id, due_date, currency, outstanding_cents, invoice_number "
                     "FROM accounting_invoices "
                     "WHERE status = 'open' AND outstanding_cents > 0 AND archived_at IS NULL "
-                    "AND due_date <= ? ORDER BY due_date, currency, invoice_number",
+                    "AND due_date <= ? AND NOT EXISTS (SELECT 1 FROM "
+                    "accounting_task_invoices AS active_link JOIN "
+                    "accounting_task_batches AS active_batch ON active_batch.id = "
+                    "active_link.task_id WHERE active_link.invoice_id = "
+                    "accounting_invoices.id AND active_batch.task_type = 'dunning' "
+                    "AND active_batch.status IN ('open', 'in_progress')) "
+                    "ORDER BY due_date, currency, invoice_number",
                     (cutoff,),
                 ).fetchall()
                 groups: dict[str, list[tuple[Any, ...]]] = {}
@@ -1518,8 +1544,16 @@ class StructuralOfficeDatabase:
                                 "DELETE FROM accounting_task_invoices WHERE task_id = ?",
                                 (duplicate[0],),
                             )
-                            self._refresh_accounting_batch(
-                                connection, duplicate[0], timestamp, True
+                            connection.execute(
+                                "UPDATE accounting_task_batches SET status = 'completed', "
+                                "completed_at = ?, updated_at = ? WHERE id = ?",
+                                (timestamp, timestamp, duplicate[0]),
+                            )
+                            connection.execute(
+                                "UPDATE task_occurrences SET status = 'completed', "
+                                "completed_at = ?, updated_at = ? WHERE source_type = "
+                                "'accounting_due_batch' AND source_id = ?",
+                                (timestamp, timestamp, duplicate[0]),
                             )
                     touched.append(batch_id)
                     current_ids = {item[0] for item in members}
@@ -1556,7 +1590,8 @@ class StructuralOfficeDatabase:
                             "WHERE task_id = ? AND invoice_id = ?",
                             (reason, outstanding, timestamp, reason, batch_id, invoice_id),
                         )
-                    self._refresh_accounting_batch(connection, batch_id, timestamp, bool(rule[6]))
+                    if self._refresh_accounting_batch(connection, batch_id, timestamp):
+                        confirmation_required += 1
 
                 connection.execute(
                     "INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
@@ -1568,22 +1603,15 @@ class StructuralOfficeDatabase:
                 "WHERE status IN ('open', 'in_progress')"
             ).fetchall()
             for batch_id, rule_id in open_batches:
-                if batch_id in touched or rule_id not in processed_rule_ids:
+                if batch_id in touched:
                     continue
-                auto_complete = connection.execute(
-                    "SELECT auto_complete_empty_batches FROM accounting_escalation_rules "
-                    "WHERE id = ?",
-                    (rule_id,),
-                ).fetchone()
-                was_completed = self._refresh_accounting_batch(
-                    connection,
-                    batch_id,
-                    timestamp,
-                    bool(auto_complete[0]) if auto_complete else True,
-                )
-                completed += int(was_completed)
+                if not force and rule_id not in processed_rule_ids:
+                    continue
+                if self._refresh_accounting_batch(connection, batch_id, timestamp):
+                    confirmation_required += 1
         return {
-            "completed": completed,
+            "completed": 0,
+            "confirmation_required": confirmation_required,
             "created": created,
             "evaluation_date": evaluation_date,
             "notifiable_created": notifiable_created,
@@ -1595,7 +1623,6 @@ class StructuralOfficeDatabase:
         connection: sqlite3.Connection,
         batch_id: str,
         timestamp: str,
-        auto_complete: bool,
     ) -> bool:
         members = connection.execute(
             """SELECT link.invoice_id, invoice.status, invoice.outstanding_cents
@@ -1625,25 +1652,26 @@ class StructuralOfficeDatabase:
         open_members = [item for item in members if item[1] == "open" and item[2] > 0]
         count = len(open_members)
         outstanding = sum(item[2] for item in open_members)
-        previous_status = connection.execute(
-            "SELECT status FROM accounting_task_batches WHERE id = ?", (batch_id,)
-        ).fetchone()[0]
-        completed = auto_complete and count == 0 and previous_status != "auto_completed"
-        if auto_complete and count == 0:
-            status = "auto_completed"
-        elif previous_status == "auto_completed":
-            status = "open"
-        else:
-            status = previous_status
+        previous = connection.execute(
+            "SELECT status, settlement_confirmation_required FROM "
+            "accounting_task_batches WHERE id = ?",
+            (batch_id,),
+        ).fetchone()
+        status = previous[0]
+        confirmation_required = count == 0 and status in {"open", "in_progress"}
+        newly_required = confirmation_required and not bool(previous[1])
         connection.execute(
             "UPDATE accounting_task_batches SET invoice_count_open = ?, "
-            "outstanding_cents = ?, status = ?, completed_at = ?, updated_at = ? "
+            "outstanding_cents = ?, settlement_confirmation_required = ?, "
+            "settlement_detected_at = CASE WHEN ? THEN "
+            "COALESCE(settlement_detected_at, ?) ELSE NULL END, updated_at = ? "
             "WHERE id = ?",
             (
                 count,
                 outstanding,
-                status,
-                timestamp if status in {"auto_completed", "completed"} else None,
+                int(confirmation_required),
+                int(confirmation_required),
+                timestamp,
                 timestamp,
                 batch_id,
             ),
@@ -1651,7 +1679,8 @@ class StructuralOfficeDatabase:
         batch = connection.execute(
             "SELECT task_type, escalation_level, source_due_date, due_at, status, "
             "invoice_count_initial, invoice_count_open, outstanding_cents, currency, "
-            "estimated_minutes "
+            "estimated_minutes, settlement_confirmation_required, "
+            "settlement_detected_at, parent_batch_id "
             "FROM accounting_task_batches WHERE id = ?",
             (batch_id,),
         ).fetchone()
@@ -1660,8 +1689,7 @@ class StructuralOfficeDatabase:
             for row in connection.execute(
                 "SELECT invoice.invoice_number FROM accounting_task_invoices AS link "
                 "JOIN accounting_invoices AS invoice ON invoice.id = link.invoice_id "
-                "WHERE link.task_id = ? AND invoice.status = 'open' "
-                "AND invoice.outstanding_cents > 0 ORDER BY invoice.invoice_number",
+                "WHERE link.task_id = ? ORDER BY invoice.invoice_number",
                 (batch_id,),
             ).fetchall()
         ]
@@ -1677,6 +1705,13 @@ class StructuralOfficeDatabase:
         task_id = f"accounting:{batch_id}"
         snapshot = json.dumps(
             {
+                "available_actions": (
+                    ["confirm_settled"]
+                    if bool(batch[10])
+                    else ["schedule_dunning"]
+                    if batch[0] == "payment_reminder"
+                    else []
+                ),
                 "category": "Accounting",
                 "currency": batch[8],
                 "description": (
@@ -1690,9 +1725,19 @@ class StructuralOfficeDatabase:
                 "invoice_range": invoice_range,
                 "last_invoice_number": last_invoice_number,
                 "outstanding_cents": batch[7],
+                "parent_batch_id": batch[12],
+                "parent_task_id": (
+                    f"accounting:{batch[12]}" if batch[12] is not None else None
+                ),
+                "settlement_confirmation_required": bool(batch[10]),
+                "settlement_detected_at": batch[11],
                 "source_due_date": batch[2],
                 "task_type": batch[0],
-                "topic_name": f"Write payment reminders {invoice_range}",
+                "topic_name": (
+                    f"Write dunning notice {invoice_range}"
+                    if batch[0] == "dunning"
+                    else f"Write payment reminders {invoice_range}"
+                ),
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -1703,12 +1748,13 @@ class StructuralOfficeDatabase:
                 topic_snapshot, estimated_minutes, created_at, updated_at
             ) VALUES(?, 'accounting_due_batch', ?, ?, ?, ?, 'high', ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET due_at=excluded.due_at,
-                status=excluded.status, topic_snapshot=excluded.topic_snapshot,
+                scheduled_date=excluded.scheduled_date, status=excluded.status,
+                topic_snapshot=excluded.topic_snapshot,
                 updated_at=excluded.updated_at, revision=task_occurrences.revision + 1""",
             (
                 task_id,
                 batch_id,
-                batch[2],
+                batch[3][:10],
                 batch[3],
                 batch[4],
                 snapshot,
@@ -1717,7 +1763,7 @@ class StructuralOfficeDatabase:
                 timestamp,
             ),
         )
-        return completed
+        return newly_required
 
     def list_accounting_task_batches(
         self, *, status: str | None = None, limit: int = 100, offset: int = 0
@@ -1736,7 +1782,8 @@ class StructuralOfficeDatabase:
                 "evaluation_date, due_at, status, invoice_count_initial, "
                 "invoice_count_open, outstanding_cents, estimated_minutes, "
                 "created_automatically, "
-                "rule_id, created_at, updated_at, completed_at, revision "
+                "rule_id, parent_batch_id, settlement_confirmation_required, "
+                "settlement_detected_at, created_at, updated_at, completed_at, revision "
                 f"FROM accounting_task_batches {where} ORDER BY due_at DESC LIMIT ? OFFSET ?",
                 (*params, limit, offset),
             ).fetchall()
@@ -1745,10 +1792,16 @@ class StructuralOfficeDatabase:
             "evaluation_date", "due_at", "status", "invoice_count_initial",
             "invoice_count_open", "outstanding_cents", "estimated_minutes",
             "created_automatically",
-            "rule_id", "created_at", "updated_at", "completed_at", "revision",
+            "rule_id", "parent_batch_id", "settlement_confirmation_required",
+            "settlement_detected_at", "created_at", "updated_at", "completed_at", "revision",
         )
+        items = [dict(zip(keys, row, strict=True)) for row in rows]
+        for item in items:
+            item["settlement_confirmation_required"] = bool(
+                item["settlement_confirmation_required"]
+            )
         return {
-            "items": [dict(zip(keys, row, strict=True)) for row in rows],
+            "items": items,
             "limit": limit,
             "offset": offset,
             "total": total,
@@ -1900,6 +1953,234 @@ class StructuralOfficeDatabase:
             "open_task_count": len(tasks),
         }
 
+    def schedule_dunning_task(
+        self,
+        task_id: str,
+        expected_revision: int,
+        due_date: str,
+        estimated_minutes: int,
+        timestamp: str,
+        user_id: str,
+        user_name: str,
+    ) -> dict[str, Any]:
+        """Complete a payment-reminder task and schedule its dunning follow-up."""
+        try:
+            date.fromisoformat(due_date)
+        except ValueError as err:
+            raise StructuralOfficeValidationError(
+                "Dunning due date must use YYYY-MM-DD"
+            ) from err
+        if not 1 <= estimated_minutes <= 1440:
+            raise StructuralOfficeValidationError(
+                "Estimated minutes must be between 1 and 1440"
+            )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute(
+                "SELECT revision, source_type, source_id, status, topic_snapshot "
+                "FROM task_occurrences "
+                "WHERE id = ? AND archived_at IS NULL",
+                (task_id,),
+            ).fetchone()
+            if task is None or task[1] != "accounting_due_batch" or not task[2]:
+                raise StructuralOfficeValidationError(
+                    "Only a payment-reminder task can schedule a dunning task"
+                )
+            if task[0] != expected_revision:
+                raise StructuralOfficeConflictError(self.get_materialized_task(task_id))
+            if task[3] not in {"open", "in_progress"}:
+                raise StructuralOfficeValidationError("Payment-reminder task is already closed")
+            batch = connection.execute(
+                "SELECT task_type, source_due_date, currency FROM "
+                "accounting_task_batches WHERE id = ?",
+                (task[2],),
+            ).fetchone()
+            if batch is None or batch[0] != "payment_reminder":
+                raise StructuralOfficeValidationError(
+                    "Only a payment-reminder task can schedule a dunning task"
+                )
+            if connection.execute(
+                "SELECT 1 FROM accounting_task_batches WHERE parent_batch_id = ?",
+                (task[2],),
+            ).fetchone():
+                raise StructuralOfficeValidationError("A dunning task is already scheduled")
+            members = connection.execute(
+                "SELECT invoice.id, invoice.outstanding_cents FROM "
+                "accounting_task_invoices AS link JOIN accounting_invoices AS invoice "
+                "ON invoice.id = link.invoice_id WHERE link.task_id = ? "
+                "AND invoice.status = 'open' AND invoice.outstanding_cents > 0 "
+                "ORDER BY invoice.invoice_number",
+                (task[2],),
+            ).fetchall()
+            if not members:
+                raise StructuralOfficeValidationError(
+                    "All linked invoices are settled; confirm settlement instead"
+                )
+            batch_id = uuid4().hex
+            membership_fingerprint = hashlib.sha256(
+                "\n".join(item[0] for item in members).encode()
+            ).hexdigest()
+            connection.execute(
+                """INSERT INTO accounting_task_batches(
+                    id, task_type, escalation_level, source_due_date, currency,
+                    evaluation_date, due_at, status, invoice_count_initial,
+                    invoice_count_open, outstanding_cents, estimated_minutes,
+                    created_automatically, rule_id, deduplication_key,
+                    membership_fingerprint, parent_batch_id, created_at, updated_at
+                ) VALUES(?, 'dunning', 1, ?, ?, ?, ?, 'open', ?, ?, ?, ?, 0, NULL,
+                    ?, ?, ?, ?, ?)""",
+                (
+                    batch_id,
+                    batch[1],
+                    batch[2],
+                    timestamp[:10],
+                    f"{due_date}T09:00:00",
+                    len(members),
+                    len(members),
+                    sum(item[1] for item in members),
+                    estimated_minutes,
+                    f"manual-dunning:{batch_id}",
+                    membership_fingerprint,
+                    task[2],
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            connection.executemany(
+                "INSERT INTO accounting_task_invoices(task_id, invoice_id, "
+                "outstanding_cents_at_creation, outstanding_cents_current, status, "
+                "included_at) VALUES(?, ?, ?, ?, 'open', ?)",
+                (
+                    (batch_id, invoice_id, outstanding, outstanding, timestamp)
+                    for invoice_id, outstanding in members
+                ),
+            )
+            self._refresh_accounting_batch(connection, batch_id, timestamp)
+            connection.execute(
+                "UPDATE accounting_task_batches SET status = 'completed', "
+                "completed_at = ?, settlement_confirmation_required = 0, "
+                "updated_at = ?, revision = revision + 1 WHERE id = ?",
+                (timestamp, timestamp, task[2]),
+            )
+            connection.execute(
+                "UPDATE task_occurrences SET status = 'completed', completed_at = ?, "
+                "completed_by = ?, topic_snapshot = ?, updated_at = ?, "
+                "revision = revision + 1 WHERE id = ?",
+                (
+                    timestamp,
+                    user_id,
+                    json.dumps(
+                        {**json.loads(task[4]), "available_actions": []},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    timestamp,
+                    task_id,
+                ),
+            )
+            self._record_change(
+                connection,
+                "tasks",
+                task_id,
+                "completed",
+                expected_revision + 1,
+                user_id,
+                user_name,
+                ["dunning_due_date", "status"],
+                {"dunning_due_date": due_date, "status": "completed"},
+                timestamp,
+            )
+            child_task_id = f"accounting:{batch_id}"
+            child_revision = connection.execute(
+                "SELECT revision FROM task_occurrences WHERE id = ?", (child_task_id,)
+            ).fetchone()[0]
+            self._record_change(
+                connection,
+                "tasks",
+                child_task_id,
+                "created",
+                child_revision,
+                user_id,
+                user_name,
+                ["due_at", "estimated_minutes", "source_type"],
+                {"due_date": due_date, "parent_task_id": task_id},
+                timestamp,
+            )
+        return {
+            "completed_task": self.get_materialized_task(task_id),
+            "dunning_task": self.get_materialized_task(child_task_id),
+        }
+
+    def confirm_accounting_task_settled(
+        self,
+        task_id: str,
+        expected_revision: int,
+        timestamp: str,
+        user_id: str,
+        user_name: str,
+    ) -> dict[str, Any]:
+        """Complete an invoice task after the user confirms all invoices are settled."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute(
+                "SELECT revision, source_type, source_id, status, topic_snapshot "
+                "FROM task_occurrences "
+                "WHERE id = ? AND archived_at IS NULL",
+                (task_id,),
+            ).fetchone()
+            if task is None or task[1] != "accounting_due_batch" or not task[2]:
+                raise StructuralOfficeValidationError("Accounting task was not found")
+            if task[0] != expected_revision:
+                raise StructuralOfficeConflictError(self.get_materialized_task(task_id))
+            batch = connection.execute(
+                "SELECT invoice_count_open, settlement_confirmation_required FROM "
+                "accounting_task_batches WHERE id = ?",
+                (task[2],),
+            ).fetchone()
+            if batch is None or batch[0] != 0 or not bool(batch[1]):
+                raise StructuralOfficeValidationError(
+                    "Settlement confirmation is not currently available"
+                )
+            connection.execute(
+                "UPDATE accounting_task_batches SET status = 'completed', "
+                "completed_at = ?, settlement_confirmation_required = 0, "
+                "updated_at = ?, revision = revision + 1 WHERE id = ?",
+                (timestamp, timestamp, task[2]),
+            )
+            connection.execute(
+                "UPDATE task_occurrences SET status = 'completed', completed_at = ?, "
+                "completed_by = ?, topic_snapshot = ?, updated_at = ?, "
+                "revision = revision + 1 WHERE id = ?",
+                (
+                    timestamp,
+                    user_id,
+                    json.dumps(
+                        {
+                            **json.loads(task[4]),
+                            "available_actions": [],
+                            "settlement_confirmation_required": False,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    timestamp,
+                    task_id,
+                ),
+            )
+            self._record_change(
+                connection,
+                "tasks",
+                task_id,
+                "settlement_confirmed",
+                expected_revision + 1,
+                user_id,
+                user_name,
+                ["settlement_confirmation_required", "status"],
+                {"settlement_confirmation_required": False, "status": "completed"},
+                timestamp,
+            )
+        return self.get_materialized_task(task_id)
+
     def create_manual_task(
         self, raw: dict[str, Any], timestamp: str, user_id: str, user_name: str
     ) -> dict[str, Any]:
@@ -2023,6 +2304,20 @@ class StructuralOfficeDatabase:
             if row[0] != expected_revision:
                 raise StructuralOfficeConflictError(self.get_materialized_task(task_id))
             status = normalized.get("status", row[3])
+            if row[1] == "accounting_due_batch" and status == "completed":
+                batch_state = connection.execute(
+                    "SELECT task_type, settlement_confirmation_required FROM "
+                    "accounting_task_batches WHERE id = ?",
+                    (row[2],),
+                ).fetchone()
+                if batch_state and batch_state[0] == "payment_reminder":
+                    raise StructuralOfficeValidationError(
+                        "Use schedule-dunning to complete a payment-reminder task, "
+                        "or confirm-settled when all invoices are settled"
+                    )
+                raise StructuralOfficeValidationError(
+                    "Use confirm-settled to complete an accounting follow-up task"
+                )
             started_at = row[4] or (timestamp if status == "in_progress" else None)
             terminal = status in {"completed", "skipped", "cancelled", "auto_completed"}
             completed_at = (row[5] or timestamp) if terminal else None

@@ -5,11 +5,64 @@ All notable changes to StructuralOffice are documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.9.2-beta] - 2026-08-17
+
+### Added
+
+- One private SQLite database and backup directory for every authorized Home Assistant
+  user, selected exclusively from the authenticated user identity.
+- Central tenant registry for administrator, editor, and viewer access without sharing
+  business records between users.
+- Isolation tests covering distinct database paths, record separation, and lossless
+  migration of the former shared database.
+
+### Changed
+
+- Existing shared data is copied to the Home Assistant owner's private database on first
+  startup only; the former source database and backups remain available for rollback and
+  are never reassigned if the original Home Assistant owner is later removed.
+- REST endpoints, backup operations, imports, audit history, edit presence, schedulers,
+  and document workflows now operate only on the authenticated user's database.
+- WebSocket live events carry an internal tenant marker and are delivered only to the
+  matching authenticated user.
+- Removing a user's StructuralOffice role denies access without deleting that user's
+  private database.
+- Shared Home Assistant notification targets are disabled for non-owner tenants to avoid
+  leaking task information across users.
+- The frontend cache and integration version are now `0.9.2-beta`.
+
+### Security
+
+- Clients cannot select a database or tenant through request data; tenant routing always
+  derives from the Home Assistant access token.
+
+## [0.9.1-beta] - 2026-08-17
+
+### Added
+
+- Database schema version 6 with persistent parent-child links between a grouped
+  payment-reminder task and its manually scheduled dunning follow-up.
+- Revision-protected `schedule-dunning` transition that completes the payment-reminder
+  task and creates one dunning task for a user-selected payment deadline.
+- Settlement detection after invoice CSV imports without automatic task completion.
+- Explicit `confirm-settled` transition for completing an invoice follow-up only after
+  the user confirms that the detected settlement is correct.
+- Settlement-confirmation state and detection timestamp in accounting task responses
+  and task snapshots for the future frontend workflow.
+
+### Changed
+
+- Invoice follow-up tasks remain open when all linked invoices become paid or cancelled.
+  They are completed only after an authorized user confirms settlement.
+- Generic task updates can no longer bypass payment-reminder scheduling or settlement
+  confirmation for accounting tasks.
+- The frontend cache and integration version are now `0.9.1-beta`.
+
 ## [0.9.0-beta] - 2026-08-17
 
 ### Added
 
-- Database schema version 5 as the frozen StructuralOffice 1.0 task model.
+- Database schema version 5 with the StructuralOffice 1.0 task and duration model.
 - Direct routines that materialize recurring tasks without a separate topic record.
 - Estimated minutes on routines, materialized tasks, and standalone tasks.
 - Configurable estimated duration for grouped payment-reminder tasks, defaulting to ten
@@ -253,7 +306,9 @@ All notable changes to StructuralOffice are documented in this file. The format 
 - Push notifications to selected `notify` entities
 - Task states, sensors, calendar support, and local storage
 
-[Unreleased]: https://github.com/jl0906/StructuralOffice/compare/v0.9.0-beta...HEAD
+[Unreleased]: https://github.com/jl0906/StructuralOffice/compare/v0.9.2-beta...HEAD
+[0.9.2-beta]: https://github.com/jl0906/StructuralOffice/compare/v0.9.1-beta...v0.9.2-beta
+[0.9.1-beta]: https://github.com/jl0906/StructuralOffice/compare/v0.9.0-beta...v0.9.1-beta
 [0.9.0-beta]: https://github.com/jl0906/StructuralOffice/compare/v0.7.1-alpha...v0.9.0-beta
 [0.7.1-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.7.0-alpha...v0.7.1-alpha
 [0.7.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.6.0-alpha...v0.7.0-alpha

@@ -21,7 +21,7 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up the StructuralOffice calendar."""
-    async_add_entities([StructuralOfficeCalendar(entry.runtime_data.manager)])
+    async_add_entities([StructuralOfficeCalendar(entry.runtime_data.tenants.primary_manager)])
 
 
 class StructuralOfficeCalendar(CalendarEntity):

@@ -21,24 +21,25 @@ from .excel import export_invoices_xlsx, load_template_xlsx, parse_invoices_xlsx
 from .manager import StructuralOfficeManager
 from .models import StructuralOfficeValidationError
 from .pdf_document import build_invoice_pdf
+from .tenancy import StructuralOfficeTenantRegistry
 
 READ_ROLES = {"admin", "editor", "viewer"}
 WRITE_ROLES = {"admin", "editor"}
 
 
-def _manager(hass: HomeAssistant) -> StructuralOfficeManager:
-    manager = hass.data.get(DOMAIN, {}).get("manager")
-    if manager is None:
+def _tenants(hass: HomeAssistant) -> StructuralOfficeTenantRegistry:
+    tenants = hass.data.get(DOMAIN, {}).get("tenants")
+    if tenants is None:
         raise StructuralOfficeValidationError("StructuralOffice is not configured")
-    return manager
+    return tenants
 
 
-def _role(manager: StructuralOfficeManager, connection) -> str | None:
-    return manager.user_role(connection.user.id, connection.user.is_admin)
+def _manager(hass: HomeAssistant, user_id: str) -> StructuralOfficeManager:
+    return _tenants(hass).manager_for(user_id)
 
 
-def _require_role(manager: StructuralOfficeManager, connection, roles: set[str]) -> str:
-    role = _role(manager, connection)
+def _require_role(hass: HomeAssistant, connection, roles: set[str]) -> str:
+    role = _tenants(hass).user_role(connection.user.id, connection.user.is_admin)
     if role not in roles:
         raise StructuralOfficeValidationError(
             "Access to StructuralOffice is denied. Contact an administrator."
@@ -55,8 +56,8 @@ def _error(connection: websocket_api.ActiveConnection, msg: dict, err: Exception
 async def ws_get_data(hass, connection, msg) -> None:
     """Return the reduced Home Assistant administration dashboard."""
     try:
-        manager = _manager(hass)
-        role = _require_role(manager, connection, {"admin"})
+        manager = _manager(hass, connection.user.id)
+        role = _require_role(hass, connection, {"admin"})
         result = manager.system_data()
         result["access"] = role
         connection.send_result(msg["id"], result)
@@ -69,12 +70,13 @@ async def ws_get_data(hass, connection, msg) -> None:
 async def ws_subscribe_live(hass, connection, msg) -> None:
     """Subscribe an authorized Windows client to live record and presence events."""
     try:
-        manager = _manager(hass)
-        _require_role(manager, connection, READ_ROLES)
+        _manager(hass, connection.user.id)
+        _require_role(hass, connection, READ_ROLES)
 
         @callback
         def forward_event(event: Event) -> None:
-            connection.send_event(msg["id"], event.data)
+            if event.data.get("tenant_user_id") == connection.user.id:
+                connection.send_event(msg["id"], event.data)
 
         connection.subscriptions[msg["id"]] = hass.bus.async_listen(
             LIVE_UPDATE_EVENT, forward_event
@@ -92,9 +94,8 @@ async def ws_subscribe_live(hass, connection, msg) -> None:
 async def ws_set_user_role(hass, connection, msg) -> None:
     """Assign a StructuralOffice role. Home Assistant admins remain admins."""
     try:
-        manager = _manager(hass)
-        _require_role(manager, connection, {"admin"})
-        await manager.async_set_user_role(
+        _require_role(hass, connection, {"admin"})
+        await _tenants(hass).async_set_user_role(
             msg["user_id"], None if msg["role"] == "none" else msg["role"]
         )
         connection.send_result(msg["id"])
@@ -114,8 +115,8 @@ def _write_command(command_type: str, key: str, handler):
     @websocket_api.websocket_command(schema)
     async def command(hass, connection, msg) -> None:
         try:
-            manager = _manager(hass)
-            _require_role(manager, connection, WRITE_ROLES)
+            manager = _manager(hass, connection.user.id)
+            _require_role(hass, connection, WRITE_ROLES)
             result = await handler(manager, msg[key])
             connection.send_result(msg["id"], result)
         except (StructuralOfficeValidationError, TypeError, ValueError) as err:
@@ -155,8 +156,8 @@ ws_delete_invoice = _write_command(
 )
 async def ws_set_occurrence_status(hass, connection, msg) -> None:
     try:
-        manager = _manager(hass)
-        _require_role(manager, connection, WRITE_ROLES)
+        manager = _manager(hass, connection.user.id)
+        _require_role(hass, connection, WRITE_ROLES)
         result = await manager.async_set_occurrence_status(msg["occurrence_id"], msg["status"])
         connection.send_result(msg["id"], result)
     except StructuralOfficeValidationError as err:
@@ -167,8 +168,8 @@ async def ws_set_occurrence_status(hass, connection, msg) -> None:
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/test_notification"})
 async def ws_test_notification(hass, connection, msg) -> None:
     try:
-        manager = _manager(hass)
-        _require_role(manager, connection, {"admin"})
+        manager = _manager(hass, connection.user.id)
+        _require_role(hass, connection, {"admin"})
         await manager.async_send_test_notification()
         connection.send_result(msg["id"])
     except StructuralOfficeValidationError as err:
@@ -180,8 +181,8 @@ async def ws_test_notification(hass, connection, msg) -> None:
 async def ws_create_backup(hass, connection, msg) -> None:
     """Create a managed SQLite backup from the Home Assistant panel."""
     try:
-        manager = _manager(hass)
-        _require_role(manager, connection, {"admin"})
+        manager = _manager(hass, connection.user.id)
+        _require_role(hass, connection, {"admin"})
         connection.send_result(msg["id"], await manager.async_create_backup())
     except StructuralOfficeValidationError as err:
         _error(connection, msg, err)
@@ -197,8 +198,8 @@ async def ws_create_backup(hass, connection, msg) -> None:
 async def ws_restore_backup(hass, connection, msg) -> None:
     """Restore a managed SQLite backup from the Home Assistant panel."""
     try:
-        manager = _manager(hass)
-        _require_role(manager, connection, {"admin"})
+        manager = _manager(hass, connection.user.id)
+        _require_role(hass, connection, {"admin"})
         await manager.async_restore_backup(msg["filename"])
         connection.send_result(msg["id"])
     except StructuralOfficeValidationError as err:
@@ -215,8 +216,8 @@ async def ws_restore_backup(hass, connection, msg) -> None:
 async def ws_delete_backup(hass, connection, msg) -> None:
     """Delete a managed SQLite backup from the Home Assistant panel."""
     try:
-        manager = _manager(hass)
-        _require_role(manager, connection, {"admin"})
+        manager = _manager(hass, connection.user.id)
+        _require_role(hass, connection, {"admin"})
         await manager.async_delete_backup(msg["filename"])
         connection.send_result(msg["id"])
     except StructuralOfficeValidationError as err:
@@ -229,8 +230,8 @@ async def ws_delete_backup(hass, connection, msg) -> None:
 )
 async def ws_preview_invoice_import(hass, connection, msg) -> None:
     try:
-        manager = _manager(hass)
-        _require_role(manager, connection, WRITE_ROLES)
+        manager = _manager(hass, connection.user.id)
+        _require_role(hass, connection, WRITE_ROLES)
         if len(msg["content"]) > 7_500_000:
             raise StructuralOfficeValidationError("Excel file is larger than 5 MB")
         content = base64.b64decode(msg["content"], validate=True)
@@ -249,8 +250,8 @@ async def ws_preview_invoice_import(hass, connection, msg) -> None:
 )
 async def ws_apply_invoice_import(hass, connection, msg) -> None:
     try:
-        manager = _manager(hass)
-        _require_role(manager, connection, WRITE_ROLES)
+        manager = _manager(hass, connection.user.id)
+        _require_role(hass, connection, WRITE_ROLES)
         result = await manager.async_import_invoices(msg["records"])
         connection.send_result(msg["id"], result)
     except (StructuralOfficeValidationError, TypeError, ValueError) as err:
@@ -263,8 +264,8 @@ async def ws_apply_invoice_import(hass, connection, msg) -> None:
 )
 async def ws_export_invoices(hass, connection, msg) -> None:
     try:
-        manager = _manager(hass)
-        _require_role(manager, connection, READ_ROLES)
+        manager = _manager(hass, connection.user.id)
+        _require_role(hass, connection, READ_ROLES)
         invoices = [] if msg["empty"] else list(manager.data["invoices"].values())
         content = await hass.async_add_executor_job(
             load_template_xlsx if msg["empty"] else export_invoices_xlsx,
@@ -284,8 +285,8 @@ async def ws_export_invoices(hass, connection, msg) -> None:
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/export_invoices_csv"})
 async def ws_export_invoices_csv(hass, connection, msg) -> None:
     try:
-        manager = _manager(hass)
-        _require_role(manager, connection, READ_ROLES)
+        manager = _manager(hass, connection.user.id)
+        _require_role(hass, connection, READ_ROLES)
         content = export_invoices_csv(list(manager.data["invoices"].values()))
         connection.send_result(msg["id"], _download(content, csv_filename()))
     except StructuralOfficeValidationError as err:
@@ -302,8 +303,8 @@ async def ws_export_invoices_csv(hass, connection, msg) -> None:
 )
 async def ws_generate_invoice_pdf(hass, connection, msg) -> None:
     try:
-        manager = _manager(hass)
-        _require_role(manager, connection, WRITE_ROLES)
+        manager = _manager(hass, connection.user.id)
+        _require_role(hass, connection, WRITE_ROLES)
         invoice = manager.data["invoices"].get(msg["invoice_id"])
         if invoice is None:
             raise StructuralOfficeValidationError("Accounting record was not found")

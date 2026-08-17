@@ -5,13 +5,18 @@ invoice due-date monitoring. The operational desktop interface is being moved to
 separate Windows application. Home Assistant now provides database health statistics
 and managed backup controls only.
 
-## Version 0.9.0-beta
+## Version 0.9.2-beta
 
-This release completes the main backend task lifecycle and stabilizes the contract needed
-to start the Windows-client beta work:
+This release adds private per-user storage while retaining the main backend task
+lifecycle and the contract needed by the Windows client:
 
-- Dedicated, versioned SQLite database at
-  `/config/structuraloffice/structuraloffice.db`
+- A dedicated, versioned SQLite database for every authorized Home Assistant user under
+  `/config/structuraloffice/users/<opaque-user-id>/structuraloffice.db`
+- Complete isolation of contacts, topics, routines, tasks, invoices, import history,
+  audit entries, edit presence, generated workflows, and backups between users
+- Central administrator/editor/viewer role assignment using existing Home Assistant users
+- Lossless upgrade of the former shared database into the Home Assistant owner's private
+  database while retaining the original source for rollback
 - One-time migration of existing alpha data from Home Assistant JSON storage
 - Authenticated REST API under `/api/structuraloffice/v1`
 - Semicolon-separated invoice-list CSV import with UTF-8 and Windows-1252 support
@@ -61,11 +66,13 @@ to start the Windows-client beta work:
 - Paginated import history, row details, and administrator-only source downloads
 - Automatic safety backup before every database schema migration
 - Machine-readable OpenAPI 3.1 contract for the future Windows client
-- Database schema migration from versions 1 through 4 to the release-model schema 5
+- Database schema migration from versions 1 through 5 to schema 6
 - Direct routines that create tasks without requiring a separate topic
 - Required estimated durations for routines and standalone tasks
 - A configurable 10-minute default for each grouped payment-reminder task
 - A today-dashboard API returning total estimated office time and the longest due task
+- A confirmed transition from payment reminder to a user-scheduled dunning task
+- CSV-driven settlement detection requiring confirmation before task completion
 
 StructuralOffice automatically creates one grouped payment-reminder writing task when
 receivables remain unpaid after their configured due dates. It never creates or sends
@@ -80,6 +87,19 @@ Until the repository is included in the default HACS repository list:
 3. Restart Home Assistant.
 4. Open **Settings → Devices & services → Add integration** and select StructuralOffice.
 5. Configure the default payment term and whether a SEPA debit date overrides it.
+
+## Multiple users and private databases
+
+Create a separate account for each person in Home Assistant. Home Assistant administrators
+can use StructuralOffice immediately; non-administrator accounts must receive the viewer or
+editor role through the authenticated roles API. Assign the editor role to a person who
+should maintain their own records.
+
+Each authorized account is routed exclusively to its own SQLite database and backup
+directory. Removing a StructuralOffice role blocks access but deliberately retains that
+user's database, so reassignment restores the same records. Deleting a Home Assistant user
+also leaves the private database on disk for deliberate administrator-controlled retention
+or removal.
 
 The StructuralOffice sidebar panel is restricted to Home Assistant administrators. It
 contains database statistics and backup management only. Invoice statistics, operational
@@ -130,6 +150,8 @@ in [API.md](API.md) and [OPENAPI.yaml](OPENAPI.yaml).
 | `GET` | `/api/structuraloffice/v1/tasks` | Materialized recurring and accounting tasks |
 | `POST` | `/api/structuraloffice/v1/tasks` | Create a standalone task |
 | `GET/PATCH` | `/api/structuraloffice/v1/tasks/{id}` | Read or revision-protected update of a task |
+| `POST` | `/api/structuraloffice/v1/tasks/{id}/schedule-dunning` | Complete a payment reminder and schedule its dunning follow-up |
+| `POST` | `/api/structuraloffice/v1/tasks/{id}/confirm-settled` | Confirm detected settlement and complete an invoice task |
 | `PATCH` | `/api/structuraloffice/v1/tasks/{id}/checklist/{item_id}` | Revision-protected checklist update |
 | `GET` | `/api/structuraloffice/v1/accounting/tasks` | Grouped accounting follow-up tasks |
 | `GET` | `/api/structuraloffice/v1/accounting/tasks/{id}/invoices` | Exact invoice membership of one grouped task |

@@ -44,6 +44,7 @@ from .const import (
     DEFAULT_REMINDER_TIME,
     DEFAULT_SEPA_DATE_AS_DUE_DATE,
     DOMAIN,
+    INTEGRATION_VERSION,
     LIVE_UPDATE_EVENT,
     SCHEDULER_INTERVAL,
     STATUS_OPEN,
@@ -69,7 +70,17 @@ _LOGGER = logging.getLogger(__name__)
 class StructuralOfficeManager:
     """Own StructuralOffice data and scheduled reminders."""
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        *,
+        database_path: Path | None = None,
+        backup_directory: Path | None = None,
+        legacy_storage: bool = True,
+        tenant_user_id: str | None = None,
+        shared_notifications: bool = True,
+    ) -> None:
         self.hass = hass
         self.entry = entry
         self.store = Store[dict[str, Any]](
@@ -79,9 +90,12 @@ class StructuralOfficeManager:
         )
         database_directory = Path(hass.config.path(DATABASE_DIRECTORY))
         self.database = StructuralOfficeDatabase(
-            database_directory / DATABASE_FILENAME,
-            database_directory / BACKUP_DIRECTORY,
+            database_path or database_directory / DATABASE_FILENAME,
+            backup_directory or database_directory / BACKUP_DIRECTORY,
         )
+        self.legacy_storage = legacy_storage
+        self.tenant_user_id = tenant_user_id
+        self.shared_notifications = shared_notifications
         self.data: dict[str, Any] = self._empty_data()
         self.database_stats: dict[str, Any] = {}
         self.backups: list[dict[str, Any]] = []
@@ -110,7 +124,7 @@ class StructuralOfficeManager:
         if any(loaded.values()):
             self.data.update(loaded)
         else:
-            legacy = await self.store.async_load()
+            legacy = await self.store.async_load() if self.legacy_storage else None
             if isinstance(legacy, dict):
                 for key in self.data:
                     if isinstance(legacy.get(key), dict):
@@ -156,7 +170,11 @@ class StructuralOfficeManager:
     def _notify_changed(self) -> None:
         for listener in list(self._listeners):
             listener()
-        self.hass.bus.async_fire(UPDATE_EVENT)
+        self.hass.bus.async_fire(UPDATE_EVENT, self._tenant_payload({}))
+
+    def _tenant_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Attach the private tenant identifier to an internal event."""
+        return {**payload, "tenant_user_id": self.tenant_user_id}
 
     async def _async_save(self) -> None:
         await self.hass.async_add_executor_job(self.database.save, self.data)
@@ -164,7 +182,7 @@ class StructuralOfficeManager:
         self._notify_changed()
         self.hass.bus.async_fire(
             LIVE_UPDATE_EVENT,
-            {"operation": "refresh", "reason": "legacy_write"},
+            self._tenant_payload({"operation": "refresh", "reason": "legacy_write"}),
         )
 
     async def _async_refresh_database_stats(self) -> None:
@@ -177,7 +195,11 @@ class StructuralOfficeManager:
     def options(self) -> dict[str, Any]:
         """Return normalized config options."""
         return {
-            CONF_NOTIFY_TARGETS: list(self.entry.options.get(CONF_NOTIFY_TARGETS, [])),
+            CONF_NOTIFY_TARGETS: (
+                list(self.entry.options.get(CONF_NOTIFY_TARGETS, []))
+                if self.shared_notifications
+                else []
+            ),
             CONF_DEFAULT_REMINDER_TIME: self.entry.options.get(
                 CONF_DEFAULT_REMINDER_TIME, DEFAULT_REMINDER_TIME
             ),
@@ -210,23 +232,6 @@ class StructuralOfficeManager:
                 )
             ),
         }
-
-    def user_role(self, user_id: str, is_admin: bool = False) -> str | None:
-        """Return an effective StructuralOffice role."""
-        if is_admin:
-            return "admin"
-        role = self.data["user_roles"].get(user_id)
-        return role if role in {"viewer", "editor"} else None
-
-    async def async_set_user_role(self, user_id: str, role: str | None) -> None:
-        """Assign or remove a StructuralOffice role."""
-        if role is not None and role not in {"viewer", "editor"}:
-            raise StructuralOfficeValidationError("Invalid role")
-        if role is None:
-            self.data["user_roles"].pop(user_id, None)
-        else:
-            self.data["user_roles"][user_id] = role
-        await self._async_save()
 
     def _validate_live_record(
         self, collection: str, raw: dict[str, Any], record_id: str | None
@@ -418,7 +423,7 @@ class StructuralOfficeManager:
             "revision": result["revision"],
             "sequence": result["event_sequence"],
         }
-        self.hass.bus.async_fire(LIVE_UPDATE_EVENT, event)
+        self.hass.bus.async_fire(LIVE_UPDATE_EVENT, self._tenant_payload(event))
         self._notify_changed()
 
     async def async_start_edit_session(
@@ -444,12 +449,12 @@ class StructuralOfficeManager:
         )
         self.hass.bus.async_fire(
             LIVE_UPDATE_EVENT,
-            {
+            self._tenant_payload({
                 "collection": collection,
                 "editors": result["editors"],
                 "operation": "presence",
                 "record_id": record_id,
-            },
+            }),
         )
         return result
 
@@ -465,12 +470,12 @@ class StructuralOfficeManager:
         )
         self.hass.bus.async_fire(
             LIVE_UPDATE_EVENT,
-            {
+            self._tenant_payload({
                 "collection": collection,
                 "editors": editors,
                 "operation": "presence",
                 "record_id": record_id,
-            },
+            }),
         )
         return ended
 
@@ -517,6 +522,64 @@ class StructuralOfficeManager:
         return await self.hass.async_add_executor_job(
             self.database.today_dashboard, today
         )
+
+    async def async_schedule_dunning_task(
+        self,
+        task_id: str,
+        expected_revision: int,
+        due_date: str,
+        user_id: str,
+        user_name: str,
+    ) -> dict[str, Any]:
+        """Complete a payment reminder and schedule its dunning follow-up."""
+        try:
+            selected_due_date = date.fromisoformat(due_date)
+        except ValueError as err:
+            raise StructuralOfficeValidationError(
+                "Dunning due date must use YYYY-MM-DD"
+            ) from err
+        if selected_due_date < dt_util.now().date():
+            raise StructuralOfficeValidationError(
+                "Dunning due date must not be in the past"
+            )
+        result = await self.hass.async_add_executor_job(
+            self.database.schedule_dunning_task,
+            task_id,
+            expected_revision,
+            due_date,
+            self.options[CONF_PAYMENT_REMINDER_ESTIMATED_MINUTES],
+            dt_util.utcnow().isoformat(),
+            user_id,
+            user_name,
+        )
+        self._fire_task_event(
+            task_id, "completed", result["completed_task"]["revision"]
+        )
+        self._fire_task_event(
+            result["dunning_task"]["id"],
+            "created",
+            result["dunning_task"]["revision"],
+        )
+        return result
+
+    async def async_confirm_accounting_task_settled(
+        self,
+        task_id: str,
+        expected_revision: int,
+        user_id: str,
+        user_name: str,
+    ) -> dict[str, Any]:
+        """Complete an invoice task after explicit settlement confirmation."""
+        result = await self.hass.async_add_executor_job(
+            self.database.confirm_accounting_task_settled,
+            task_id,
+            expected_revision,
+            dt_util.utcnow().isoformat(),
+            user_id,
+            user_name,
+        )
+        self._fire_task_event(task_id, "settlement_confirmed", result["revision"])
+        return result
 
     async def async_create_manual_task(
         self, raw: dict[str, Any], user_id: str, user_name: str
@@ -578,12 +641,12 @@ class StructuralOfficeManager:
     def _fire_task_event(self, task_id: str, operation: str, revision: int) -> None:
         self.hass.bus.async_fire(
             LIVE_UPDATE_EVENT,
-            {
+            self._tenant_payload({
                 "collection": "tasks",
                 "operation": operation,
                 "record_id": task_id,
                 "revision": revision,
-            },
+            }),
         )
         self._notify_changed()
 
@@ -862,13 +925,18 @@ class StructuralOfficeManager:
             force,
             self.options[CONF_PAYMENT_REMINDER_ESTIMATED_MINUTES],
         )
-        if result["created"] or result["updated"] or result["completed"]:
+        if (
+            result["created"]
+            or result["updated"]
+            or result["completed"]
+            or result["confirmation_required"]
+        ):
             self.hass.bus.async_fire(
                 LIVE_UPDATE_EVENT,
-                {
+                self._tenant_payload({
                     "operation": "accounting_tasks_refreshed",
                     "summary": result,
-                },
+                }),
             )
             self._notify_changed()
         if result["notifiable_created"] and self.options[CONF_NOTIFY_TARGETS]:
@@ -919,7 +987,8 @@ class StructuralOfficeManager:
         return {
             "backups": list(self.backups),
             "database": dict(self.database_stats),
-            "version": "0.9.0-beta",
+            "storage_scope": "home_assistant_user",
+            "version": INTEGRATION_VERSION,
         }
 
     async def async_set_occurrence_status(self, item_id: str, status: str) -> dict[str, Any]:

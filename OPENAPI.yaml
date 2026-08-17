@@ -1,8 +1,10 @@
 openapi: 3.1.0
 info:
   title: StructuralOffice API
-  version: 0.9.0-beta
-  description: Backend API for the separately developed StructuralOffice Windows client.
+  version: 0.9.2-beta
+  description: >-
+    Backend API for the separately developed StructuralOffice Windows client. Every
+    operation is scoped to the authenticated Home Assistant user's private database.
 servers:
   - url: /api/structuraloffice/v1
 security:
@@ -158,6 +160,51 @@ paths:
           $ref: "#/components/responses/JsonSuccess"
         "409":
           $ref: "#/components/responses/Conflict"
+  /tasks/{task_id}/schedule-dunning:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+    post:
+      summary: Complete a payment reminder and schedule its dunning follow-up
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected_revision, due_date]
+              properties:
+                expected_revision:
+                  type: integer
+                  minimum: 1
+                due_date:
+                  type: string
+                  format: date
+      responses:
+        "201":
+          $ref: "#/components/responses/JsonSuccess"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /tasks/{task_id}/confirm-settled:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+    post:
+      summary: Confirm detected settlement and complete an invoice follow-up task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected_revision]
+              properties:
+                expected_revision:
+                  type: integer
+                  minimum: 1
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "409":
+          $ref: "#/components/responses/Conflict"
   /accounting/tasks:
     get:
       summary: List grouped unpaid-invoice tasks
@@ -255,12 +302,12 @@ paths:
           $ref: "#/components/responses/JsonSuccess"
   /roles:
     get:
-      summary: List StructuralOffice user roles
+      summary: List Home Assistant users and their StructuralOffice access roles
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"
     put:
-      summary: Assign a StructuralOffice user role
+      summary: Assign access and provision the user's private database
       requestBody:
         $ref: "#/components/requestBodies/JsonBody"
       responses:
@@ -268,12 +315,12 @@ paths:
           $ref: "#/components/responses/JsonSuccess"
   /backups:
     get:
-      summary: List managed database backups
+      summary: List the authenticated user's managed database backups
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"
     post:
-      summary: Create a managed database backup
+      summary: Back up the authenticated user's private database
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"
@@ -285,17 +332,17 @@ paths:
         schema:
           type: string
     get:
-      summary: Download a managed database backup
+      summary: Download a backup owned by the authenticated user
       responses:
         "200":
           description: SQLite database file
     post:
-      summary: Restore a managed database backup
+      summary: Restore a backup into the authenticated user's database
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"
     delete:
-      summary: Delete a managed database backup
+      summary: Delete a backup owned by the authenticated user
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"

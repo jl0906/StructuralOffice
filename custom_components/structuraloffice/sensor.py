@@ -25,7 +25,7 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up StructuralOffice backend sensors."""
-    manager = entry.runtime_data.manager
+    manager = entry.runtime_data.tenants.primary_manager
     async_add_entities(
         StructuralOfficeDatabaseSensor(manager, key, name, icon, statistic, unit)
         for key, name, icon, statistic, unit in SENSORS

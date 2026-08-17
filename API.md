@@ -1,7 +1,7 @@
 # StructuralOffice API
 
-This document describes the alpha API contract implemented by StructuralOffice
-`0.9.0-beta`. The contract may change before `1.0.0`. A machine-readable contract is
+This document describes the beta API contract implemented by StructuralOffice
+`0.9.2-beta`. The contract may change before `1.0.0`. A machine-readable contract is
 available in [OPENAPI.yaml](OPENAPI.yaml).
 
 ## Connection and authorization
@@ -17,6 +17,12 @@ Content-Type: application/json
 Home Assistant authentication is followed by a StructuralOffice role check. Viewers may
 read records and events. Editors may also change business records and edit presence.
 Administrators additionally manage roles, backups, and audit access.
+
+Every successful request is routed by the authenticated Home Assistant user ID to that
+user's private SQLite database. Roles grant access to StructuralOffice itself; they never
+grant access to another user's records or backups. WebSocket live events are filtered by
+the same user identity. To add a person, first create a Home Assistant account and then
+assign that account the StructuralOffice `viewer` or `editor` role.
 
 ## Record envelopes
 
@@ -268,6 +274,46 @@ PATCH /api/structuraloffice/v1/tasks/<task-id>/checklist/<item-id>
 
 Task and checklist writes emit persistent change events and audit metadata. Stale writes
 return HTTP 409 with the current task or checklist item.
+
+## Payment-reminder to dunning transition
+
+Accounting tasks use explicit workflow transitions. A generic task patch cannot mark a
+payment-reminder or dunning task as completed. The task snapshot exposes
+`available_actions`, containing `schedule_dunning` or `confirm_settled` when the
+corresponding frontend action is valid.
+
+When the user completes a payment-reminder writing task, the frontend asks for the
+payment deadline stated in that reminder and sends:
+
+```http
+POST /api/structuraloffice/v1/tasks/<task-id>/schedule-dunning
+
+{
+  "expected_revision": 3,
+  "due_date": "2026-08-31"
+}
+```
+
+The transaction completes the payment-reminder task and creates one linked
+`Write dunning notice <invoice-range>` task due at 09:00 on the selected date. Only
+invoices still open at that moment are copied into the dunning task. Calling the
+transition twice is rejected.
+
+After a later CSV import shows that every linked invoice is no longer open, the dunning
+task remains open and its snapshot contains `settlement_confirmation_required: true`
+and `settlement_detected_at`. The frontend should ask for confirmation and then send:
+
+```http
+POST /api/structuraloffice/v1/tasks/<task-id>/confirm-settled
+
+{
+  "expected_revision": 5
+}
+```
+
+The backend verifies that no linked invoice is open before completing the task. Both
+transitions require editor access, use optimistic revisions, emit live events, and add
+audit/change metadata.
 
 ## Reminder catch-up
 

@@ -4,6 +4,7 @@ from datetime import timedelta
 
 DOMAIN = "structuraloffice"
 NAME = "StructuralOffice"
+INTEGRATION_VERSION = "0.9.2-beta"
 
 PLATFORMS = ["sensor"]
 
@@ -28,7 +29,7 @@ DEFAULT_PAYMENT_REMINDER_ESTIMATED_MINUTES = 10
 
 STORAGE_VERSION = 1
 STORAGE_KEY_PREFIX = "structuraloffice"
-DATABASE_SCHEMA_VERSION = 5
+DATABASE_SCHEMA_VERSION = 6
 DATABASE_DIRECTORY = "structuraloffice"
 DATABASE_FILENAME = "structuraloffice.db"
 BACKUP_DIRECTORY = "backups"

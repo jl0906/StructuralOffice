@@ -19,22 +19,30 @@ from .database import StructuralOfficeConflictError
 from .manager import StructuralOfficeManager
 from .models import StructuralOfficeValidationError
 from .pdf_document import build_invoice_pdf
+from .tenancy import StructuralOfficeTenantRegistry
 
 API_PREFIX = f"/api/{DOMAIN}/v1"
 
 
-def _manager(request: web.Request) -> StructuralOfficeManager:
+def _tenants(request: web.Request) -> StructuralOfficeTenantRegistry:
     hass: HomeAssistant = request.app["hass"]
-    manager = hass.data.get(DOMAIN, {}).get("manager")
-    if manager is None:
+    tenants = hass.data.get(DOMAIN, {}).get("tenants")
+    if tenants is None:
         raise web.HTTPServiceUnavailable(text="StructuralOffice is not configured")
-    return manager
+    return tenants
+
+
+def _manager(request: web.Request) -> StructuralOfficeManager:
+    user = request["hass_user"]
+    try:
+        return _tenants(request).manager_for(user.id)
+    except StructuralOfficeValidationError as err:
+        raise web.HTTPServiceUnavailable(text=str(err)) from err
 
 
 def _role(request: web.Request, *, write: bool = False, admin: bool = False) -> str:
     user = request["hass_user"]
-    manager = _manager(request)
-    role = manager.user_role(user.id, user.is_admin)
+    role = _tenants(request).user_role(user.id, user.is_admin)
     allowed = {"admin"} if admin else {"admin", "editor"} if write else {
         "admin",
         "editor",
@@ -299,6 +307,7 @@ class StructuralOfficeRolesView(HomeAssistantView):
     async def get(self, request: web.Request) -> web.Response:
         _role(request, admin=True)
         manager = _manager(request)
+        tenants = _tenants(request)
         users = await manager.hass.auth.async_get_users()
         return self.json(
             {
@@ -308,7 +317,7 @@ class StructuralOfficeRolesView(HomeAssistantView):
                         "is_active": user.is_active,
                         "is_admin": user.is_admin,
                         "name": user.name or user.id,
-                        "role": manager.user_role(user.id, user.is_admin),
+                        "role": tenants.user_role(user.id, user.is_admin),
                     }
                     for user in users
                     if not user.system_generated
@@ -323,7 +332,7 @@ class StructuralOfficeRolesView(HomeAssistantView):
             role = payload.get("role")
             if role == "none":
                 role = None
-            await _manager(request).async_set_user_role(str(payload["user_id"]), role)
+            await _tenants(request).async_set_user_role(str(payload["user_id"]), role)
             return self.json_message("Role updated")
         except (KeyError, StructuralOfficeValidationError, TypeError) as err:
             return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
@@ -406,6 +415,62 @@ class StructuralOfficeTaskView(HomeAssistantView):
                 status_code=409,
             )
         except (StructuralOfficeValidationError, TypeError, ValueError) as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+
+class StructuralOfficeScheduleDunningView(HomeAssistantView):
+    """Complete a payment reminder and schedule the linked dunning task."""
+
+    url = f"{API_PREFIX}/tasks/{{task_id}}/schedule-dunning"
+    name = f"api:{DOMAIN}:v1:task-schedule-dunning"
+
+    async def post(self, request: web.Request, task_id: str) -> web.Response:
+        _role(request, write=True)
+        try:
+            payload = await request.json()
+            user_id, user_name = _identity(request)
+            result = await _manager(request).async_schedule_dunning_task(
+                task_id,
+                int(payload["expected_revision"]),
+                str(payload["due_date"]),
+                user_id,
+                user_name,
+            )
+            return self.json(result, status_code=201)
+        except StructuralOfficeConflictError as err:
+            return self.json(
+                {"code": "revision_conflict", "current": err.current, "error": str(err)},
+                status_code=409,
+            )
+        except (KeyError, StructuralOfficeValidationError, TypeError, ValueError) as err:
+            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
+
+
+class StructuralOfficeConfirmSettlementView(HomeAssistantView):
+    """Complete an invoice task after explicit settlement confirmation."""
+
+    url = f"{API_PREFIX}/tasks/{{task_id}}/confirm-settled"
+    name = f"api:{DOMAIN}:v1:task-confirm-settled"
+
+    async def post(self, request: web.Request, task_id: str) -> web.Response:
+        _role(request, write=True)
+        try:
+            payload = await request.json()
+            user_id, user_name = _identity(request)
+            return self.json(
+                await _manager(request).async_confirm_accounting_task_settled(
+                    task_id,
+                    int(payload["expected_revision"]),
+                    user_id,
+                    user_name,
+                )
+            )
+        except StructuralOfficeConflictError as err:
+            return self.json(
+                {"code": "revision_conflict", "current": err.current, "error": str(err)},
+                status_code=409,
+            )
+        except (KeyError, StructuralOfficeValidationError, TypeError, ValueError) as err:
             return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
 
 
@@ -753,6 +818,8 @@ def async_register(hass: HomeAssistant) -> None:
         StructuralOfficeTasksView,
         StructuralOfficeTodayDashboardView,
         StructuralOfficeTaskView,
+        StructuralOfficeScheduleDunningView,
+        StructuralOfficeConfirmSettlementView,
         StructuralOfficeTaskChecklistView,
         StructuralOfficeAccountingTasksView,
         StructuralOfficeAccountingTaskInvoicesView,

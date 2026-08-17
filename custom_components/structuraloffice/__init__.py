@@ -16,13 +16,14 @@ from .api import async_register as async_register_api
 from .const import (
     DOMAIN,
     FRONTEND_URL,
+    INTEGRATION_VERSION,
     PANEL_COMPONENT,
     PANEL_ICON,
     PANEL_TITLE,
     PANEL_URL,
     PLATFORMS,
 )
-from .manager import StructuralOfficeManager
+from .tenancy import StructuralOfficeTenantRegistry
 from .websocket import async_register as async_register_websocket
 
 
@@ -30,7 +31,7 @@ from .websocket import async_register as async_register_websocket
 class StructuralOfficeRuntimeData:
     """Runtime objects for a StructuralOffice config entry."""
 
-    manager: StructuralOfficeManager
+    tenants: StructuralOfficeTenantRegistry
 
 
 type StructuralOfficeConfigEntry = ConfigEntry[StructuralOfficeRuntimeData]
@@ -50,10 +51,10 @@ async def async_setup(hass: HomeAssistant, _config: dict[str, Any]) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: StructuralOfficeConfigEntry) -> bool:
     """Set up StructuralOffice from a config entry."""
-    manager = StructuralOfficeManager(hass, entry)
-    await manager.async_initialize()
-    entry.runtime_data = StructuralOfficeRuntimeData(manager)
-    hass.data[DOMAIN]["manager"] = manager
+    tenants = StructuralOfficeTenantRegistry(hass, entry)
+    await tenants.async_initialize()
+    entry.runtime_data = StructuralOfficeRuntimeData(tenants)
+    hass.data[DOMAIN]["tenants"] = tenants
 
     if not hass.data[DOMAIN].get("static_registered"):
         frontend_path = Path(__file__).parent / "frontend"
@@ -69,7 +70,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: StructuralOfficeConfigEn
             webcomponent_name=PANEL_COMPONENT,
             sidebar_title=PANEL_TITLE,
             sidebar_icon=PANEL_ICON,
-            module_url=f"{FRONTEND_URL}?v=0.9.0-beta",
+            module_url=f"{FRONTEND_URL}?v={INTEGRATION_VERSION}",
             require_admin=True,
             config_panel_domain=DOMAIN,
             handle_safe_area=True,
@@ -82,16 +83,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: StructuralOfficeConfigEn
 
 async def _async_options_updated(hass: HomeAssistant, entry: StructuralOfficeConfigEntry) -> None:
     """Notify the runtime about updated config options."""
-    if manager := hass.data.get(DOMAIN, {}).get("manager"):
-        manager._notify_changed()
+    if tenants := hass.data.get(DOMAIN, {}).get("tenants"):
+        tenants.notify_options_changed()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: StructuralOfficeConfigEntry) -> bool:
     """Unload StructuralOffice."""
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
-    await entry.runtime_data.manager.async_shutdown()
-    hass.data[DOMAIN].pop("manager", None)
+    await entry.runtime_data.tenants.async_shutdown()
+    hass.data[DOMAIN].pop("tenants", None)
     if frontend.async_panel_exists(hass, PANEL_URL):
         frontend.async_remove_panel(hass, PANEL_URL)
     return True

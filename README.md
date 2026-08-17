@@ -5,7 +5,7 @@ invoice due-date monitoring. The operational desktop interface is being moved to
 separate Windows application. Home Assistant now provides database health statistics
 and managed backup controls only.
 
-## Version 0.7.1-alpha
+## Version 0.9.0-beta
 
 This release completes the main backend task lifecycle and stabilizes the contract needed
 to start the Windows-client beta work:
@@ -42,7 +42,7 @@ to start the Windows-client beta work:
   adjustment, including routines such as paying VAT on the eighth of every month
 - A rolling task-materialization window that preserves task history independently of
   later topic changes
-- Configurable accounting follow-up rules for payment reminders and three dunning stages
+- Configurable grouped payment-reminder task generation for overdue invoices
 - Exactly one automatic follow-up task per rule, invoice due date, and currency, linked
   to the precise set of unpaid invoices
 - Automatic completion of grouped accounting tasks after all linked invoices are paid,
@@ -61,12 +61,15 @@ to start the Windows-client beta work:
 - Paginated import history, row details, and administrator-only source downloads
 - Automatic safety backup before every database schema migration
 - Machine-readable OpenAPI 3.1 contract for the future Windows client
-- Database schema migration from versions 1, 2, and 3 to version 4
+- Database schema migration from versions 1 through 4 to the release-model schema 5
+- Direct routines that create tasks without requiring a separate topic
+- Required estimated durations for routines and standalone tasks
+- A configurable 10-minute default for each grouped payment-reminder task
+- A today-dashboard API returning total estimated office time and the longest due task
 
-StructuralOffice automatically creates tasks when receivables remain unpaid after their
-configured due dates. It never creates or sends payment-reminder or dunning documents
-automatically. A document is generated only after an authorized user explicitly requests
-it, and it must be reviewed before sending.
+StructuralOffice automatically creates one grouped payment-reminder writing task when
+receivables remain unpaid after their configured due dates. It never creates or sends
+payment-reminder or dunning documents automatically.
 
 ## Installation with HACS
 
@@ -122,6 +125,7 @@ in [API.md](API.md) and [OPENAPI.yaml](OPENAPI.yaml).
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/structuraloffice/v1/status` | Backend and database status |
+| `GET` | `/api/structuraloffice/v1/dashboard/today` | Today's estimated office workload and longest due task |
 | `GET` | `/api/structuraloffice/v1/invoices` | Normalized invoices; supports `status` and `due_state` filters |
 | `GET` | `/api/structuraloffice/v1/tasks` | Materialized recurring and accounting tasks |
 | `POST` | `/api/structuraloffice/v1/tasks` | Create a standalone task |
@@ -157,11 +161,11 @@ automatically grouped task. Only open receivables are eligible.
 
 ## Recurring and accounting tasks
 
-Topics are reusable task templates with priority, instructions, estimated duration, and
-up to 100 ordered structured steps. Routines assign one or more topics to daily, weekly,
-monthly, yearly, or explicit-date schedules. They also store due time, timezone, start
-and end dates, reminder offsets, catch-up policy, invalid-month-day behavior, and an
-optional business-day adjustment.
+Routines can define their task title, description, priority, and estimated duration
+directly, without requiring a separate topic. Legacy topic assignments remain readable
+for alpha-data migration. Routines support daily, weekly, monthly, yearly, and explicit-
+date schedules together with due time, timezone, start and end dates, reminder offsets,
+catch-up policy, invalid-month-day behavior, and an optional business-day adjustment.
 
 `non_working_dates` adds company holidays or other exceptional closure dates to the
 business-day calculation. Reminder catch-up can use the globally configured window,

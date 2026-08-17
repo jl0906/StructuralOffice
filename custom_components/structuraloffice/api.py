@@ -361,6 +361,17 @@ class StructuralOfficeTasksView(HomeAssistantView):
             return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
 
 
+class StructuralOfficeTodayDashboardView(HomeAssistantView):
+    """Return today's estimated office workload."""
+
+    url = f"{API_PREFIX}/dashboard/today"
+    name = f"api:{DOMAIN}:v1:dashboard-today"
+
+    async def get(self, request: web.Request) -> web.Response:
+        _role(request)
+        return self.json(await _manager(request).async_today_dashboard())
+
+
 class StructuralOfficeTaskView(HomeAssistantView):
     """Read or update one persisted task."""
 
@@ -740,6 +751,7 @@ def async_register(hass: HomeAssistant) -> None:
         StructuralOfficeAuditView,
         StructuralOfficeRolesView,
         StructuralOfficeTasksView,
+        StructuralOfficeTodayDashboardView,
         StructuralOfficeTaskView,
         StructuralOfficeTaskChecklistView,
         StructuralOfficeAccountingTasksView,

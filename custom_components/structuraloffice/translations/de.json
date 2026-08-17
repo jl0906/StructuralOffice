@@ -11,6 +11,7 @@
           "catch_up_hours": "Verpasste Erinnerungen nachholen (Stunden)",
           "default_reminder_time": "Standardzeit für Erinnerungen",
           "notify_targets": "Benachrichtigungsgeräte",
+          "payment_reminder_estimated_minutes": "Geschätzte Minuten je Zahlungserinnerungs-Aufgabe",
           "company_name": "Firmenname",
           "company_address": "Firmenanschrift",
           "company_email": "E-Mail-Adresse"
@@ -19,7 +20,8 @@
           "default_payment_term_days": "Wird bei importierten Rechnungen ohne eigenes Faelligkeitsdatum verwendet.",
           "sepa_date_as_due_date": "Ein vorhandener SEPA-Abbuchungstag ersetzt das berechnete Zahlungsziel.",
           "catch_up_hours": "Wie lange eine während eines Ausfalls verpasste Erinnerung noch gesendet werden darf.",
-          "notify_targets": "Eine oder mehrere Notify-Entitäten, beispielsweise dein Smartphone."
+          "notify_targets": "Eine oder mehrere Notify-Entitäten, beispielsweise dein Smartphone.",
+          "payment_reminder_estimated_minutes": "Dauer für jede neue Aufgabe eines gruppierten Rechnungsnummernbereichs."
         },
         "description": "Richte StructuralOffice ein und wähle die Geräte für Pushbenachrichtigungen.",
         "title": "StructuralOffice einrichten"
@@ -35,6 +37,7 @@
           "catch_up_hours": "Verpasste Erinnerungen nachholen (Stunden)",
           "default_reminder_time": "Standardzeit für Erinnerungen",
           "notify_targets": "Benachrichtigungsgeräte",
+          "payment_reminder_estimated_minutes": "Geschätzte Minuten je Zahlungserinnerungs-Aufgabe",
           "company_name": "Firmenname",
           "company_address": "Firmenanschrift",
           "company_email": "E-Mail-Adresse"
@@ -43,7 +46,8 @@
           "default_payment_term_days": "Neue CSV-Importe verwenden diesen Wert; bestehende Faelligkeiten bleiben unveraendert.",
           "sepa_date_as_due_date": "Ein vorhandener SEPA-Abbuchungstag ersetzt das berechnete Zahlungsziel.",
           "catch_up_hours": "0 deaktiviert das Nachholen.",
-          "notify_targets": "Diese Ziele erhalten Erinnerungen aus StructuralOffice."
+          "notify_targets": "Diese Ziele erhalten Erinnerungen aus StructuralOffice.",
+          "payment_reminder_estimated_minutes": "Neue Aufgaben verwenden diesen Wert; vorhandene behalten ihre Schätzung."
         },
         "title": "StructuralOffice Einstellungen"
       }

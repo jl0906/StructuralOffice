@@ -122,8 +122,8 @@ def validate_routine(
         raise StructuralOfficeValidationError("Routine must be an object")
 
     selected_topics = value.get("topic_ids", [])
-    if not isinstance(selected_topics, list) or not selected_topics:
-        raise StructuralOfficeValidationError("At least one topic is required")
+    if not isinstance(selected_topics, list):
+        raise StructuralOfficeValidationError("Topic IDs must be a list")
     if unknown := set(selected_topics) - topic_ids:
         raise StructuralOfficeValidationError(f"Unknown topic IDs: {', '.join(sorted(unknown))}")
 
@@ -156,6 +156,16 @@ def validate_routine(
         ZoneInfo(timezone)
     except ZoneInfoNotFoundError as err:
         raise StructuralOfficeValidationError("Unknown timezone") from err
+    if existing_id is None and "estimated_minutes" not in value:
+        raise StructuralOfficeValidationError("Estimated minutes are required")
+    estimated_minutes = int(value.get("estimated_minutes", 10))
+    if not 1 <= estimated_minutes <= 1440:
+        raise StructuralOfficeValidationError(
+            "Estimated minutes must be between 1 and 1440"
+        )
+    priority = str(value.get("priority", "normal")).strip().lower()
+    if priority not in {"low", "normal", "high", "critical"}:
+        raise StructuralOfficeValidationError("Invalid routine priority")
 
     return {
         "id": existing_id or _text(value.get("id"), "ID") or new_id(),
@@ -169,6 +179,8 @@ def validate_routine(
         "timezone": timezone,
         "end_date": end_date,
         "catch_up_policy": catch_up_policy,
+        "estimated_minutes": estimated_minutes,
+        "priority": priority,
     }
 
 

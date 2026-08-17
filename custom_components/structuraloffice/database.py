@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -188,6 +189,8 @@ class StructuralOfficeDatabase:
                     end_date TEXT,
                     enabled INTEGER NOT NULL,
                     catch_up_policy TEXT NOT NULL,
+                    estimated_minutes INTEGER NOT NULL DEFAULT 10,
+                    priority TEXT NOT NULL DEFAULT 'normal',
                     revision INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -232,6 +235,7 @@ class StructuralOfficeDatabase:
                     due_at TEXT NOT NULL,
                     status TEXT NOT NULL,
                     priority TEXT NOT NULL,
+                    estimated_minutes INTEGER NOT NULL DEFAULT 10,
                     topic_snapshot TEXT NOT NULL,
                     started_at TEXT,
                     completed_at TEXT,
@@ -323,9 +327,11 @@ class StructuralOfficeDatabase:
                     invoice_count_initial INTEGER NOT NULL,
                     invoice_count_open INTEGER NOT NULL,
                     outstanding_cents INTEGER NOT NULL,
+                    estimated_minutes INTEGER NOT NULL DEFAULT 10,
                     created_automatically INTEGER NOT NULL,
                     rule_id TEXT REFERENCES accounting_escalation_rules(id),
                     deduplication_key TEXT NOT NULL UNIQUE,
+                    membership_fingerprint TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     completed_at TEXT,
@@ -359,6 +365,49 @@ class StructuralOfficeDatabase:
                     "ALTER TABLE workflow_recurrence_rules ADD COLUMN "
                     "non_working_dates TEXT NOT NULL DEFAULT '[]'"
                 )
+            routine_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(workflow_routines)")
+            }
+            if "estimated_minutes" not in routine_columns:
+                connection.execute(
+                    "ALTER TABLE workflow_routines ADD COLUMN "
+                    "estimated_minutes INTEGER NOT NULL DEFAULT 10"
+                )
+            if "priority" not in routine_columns:
+                connection.execute(
+                    "ALTER TABLE workflow_routines ADD COLUMN "
+                    "priority TEXT NOT NULL DEFAULT 'normal'"
+                )
+            task_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(task_occurrences)")
+            }
+            if "estimated_minutes" not in task_columns:
+                connection.execute(
+                    "ALTER TABLE task_occurrences ADD COLUMN "
+                    "estimated_minutes INTEGER NOT NULL DEFAULT 10"
+                )
+            batch_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(accounting_task_batches)"
+                )
+            }
+            if "estimated_minutes" not in batch_columns:
+                connection.execute(
+                    "ALTER TABLE accounting_task_batches ADD COLUMN "
+                    "estimated_minutes INTEGER NOT NULL DEFAULT 10"
+                )
+            if "membership_fingerprint" not in batch_columns:
+                connection.execute(
+                    "ALTER TABLE accounting_task_batches ADD COLUMN "
+                    "membership_fingerprint TEXT NOT NULL DEFAULT ''"
+                )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS accounting_task_membership_idx ON "
+                "accounting_task_batches(rule_id, currency, membership_fingerprint)"
+            )
             self._insert_default_escalation_rules(connection, now)
             self._sync_all_projections(connection)
             connection.execute(
@@ -396,9 +445,6 @@ class StructuralOfficeDatabase:
     ) -> None:
         defaults = (
             ("payment-reminder-default", "payment_reminder", 0, 1),
-            ("dunning-level-1-default", "dunning", 1, 14),
-            ("dunning-level-2-default", "dunning", 2, 30),
-            ("dunning-level-3-default", "dunning", 3, 60),
         )
         connection.executemany(
             "INSERT OR IGNORE INTO accounting_escalation_rules("
@@ -412,6 +458,10 @@ class StructuralOfficeDatabase:
         connection.execute(
             "UPDATE accounting_escalation_rules SET group_by = 'invoice_range' "
             "WHERE group_by = 'due_date'"
+        )
+        connection.execute(
+            "UPDATE accounting_escalation_rules SET enabled = 0 "
+            "WHERE task_type = 'dunning'"
         )
 
     def _sync_all_projections(self, connection: sqlite3.Connection) -> None:
@@ -492,13 +542,16 @@ class StructuralOfficeDatabase:
             connection.execute(
                 """INSERT INTO workflow_routines(
                     id, name, description, timezone, due_time, start_date, end_date,
-                    enabled, catch_up_policy, revision, created_at, updated_at, archived_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    enabled, catch_up_policy, estimated_minutes, priority, revision,
+                    created_at, updated_at, archived_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name=excluded.name, description=excluded.description,
                     timezone=excluded.timezone, due_time=excluded.due_time,
                     start_date=excluded.start_date, end_date=excluded.end_date,
                     enabled=excluded.enabled, catch_up_policy=excluded.catch_up_policy,
+                    estimated_minutes=excluded.estimated_minutes,
+                    priority=excluded.priority,
                     revision=excluded.revision, updated_at=excluded.updated_at,
                     archived_at=excluded.archived_at""",
                 (
@@ -511,6 +564,8 @@ class StructuralOfficeDatabase:
                     payload.get("end_date"),
                     int(payload.get("enabled", True)),
                     payload.get("catch_up_policy", "configured_window"),
+                    int(payload.get("estimated_minutes", 10)),
+                    payload.get("priority", "normal"),
                     revision,
                     created_at,
                     updated_at,
@@ -1269,6 +1324,7 @@ class StructuralOfficeDatabase:
                     {
                         "category": occurrence.get("category", ""),
                         "description": occurrence.get("description", ""),
+                        "estimated_minutes": int(occurrence.get("estimated_minutes", 10)),
                         "routine_name": occurrence.get("routine_name", ""),
                         "topic_name": occurrence.get("topic_name", ""),
                     },
@@ -1281,8 +1337,8 @@ class StructuralOfficeDatabase:
                         """INSERT INTO task_occurrences(
                             id, routine_id, topic_id, source_type, source_id,
                             scheduled_date, due_at, status, priority, topic_snapshot,
-                            created_at, updated_at
-                        ) VALUES(?, ?, ?, 'routine', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            estimated_minutes, created_at, updated_at
+                        ) VALUES(?, ?, ?, 'routine', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             occurrence["id"],
                             occurrence["routine_id"],
@@ -1293,6 +1349,7 @@ class StructuralOfficeDatabase:
                             occurrence["status"],
                             occurrence.get("priority", "normal"),
                             snapshot,
+                            int(occurrence.get("estimated_minutes", 10)),
                             timestamp,
                             timestamp,
                         ),
@@ -1301,11 +1358,13 @@ class StructuralOfficeDatabase:
                 elif exists[0] == "open":
                     connection.execute(
                         "UPDATE task_occurrences SET due_at = ?, priority = ?, "
-                        "topic_snapshot = ?, updated_at = ? WHERE id = ?",
+                        "topic_snapshot = ?, estimated_minutes = ?, updated_at = ? "
+                        "WHERE id = ?",
                         (
                             due_at,
                             occurrence.get("priority", "normal"),
                             snapshot,
+                            int(occurrence.get("estimated_minutes", 10)),
                             timestamp,
                             occurrence["id"],
                         ),
@@ -1337,6 +1396,7 @@ class StructuralOfficeDatabase:
         timestamp: str,
         evaluation_time: str,
         force: bool = False,
+        estimated_minutes: int = 10,
     ) -> dict[str, Any]:
         """Create or refresh one invoice-range task per currency and escalation rule."""
         evaluated = date.fromisoformat(evaluation_date)
@@ -1344,6 +1404,10 @@ class StructuralOfficeDatabase:
         updated = 0
         completed = 0
         notifiable_created = 0
+        if not 1 <= estimated_minutes <= 1440:
+            raise StructuralOfficeValidationError(
+                "Estimated minutes must be between 1 and 1440"
+            )
         touched: list[str] = []
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1379,25 +1443,37 @@ class StructuralOfficeDatabase:
                     if len(members) < rule[5]:
                         continue
                     source_due_date = min(item[1] for item in members)
-                    dedupe = f"{rule[1]}:{rule[2]}:overdue:{currency}"
+                    membership_fingerprint = hashlib.sha256(
+                        "\n".join(sorted(item[0] for item in members)).encode()
+                    ).hexdigest()
                     batches = connection.execute(
                         "SELECT id, invoice_count_initial, revision, status FROM "
                         "accounting_task_batches WHERE rule_id = ? AND currency = ? "
                         "AND status IN ('open', 'in_progress') "
-                        "ORDER BY CASE WHEN deduplication_key = ? THEN 0 ELSE 1 END, "
-                        "created_at, id",
-                        (rule[0], currency, dedupe),
+                        "ORDER BY created_at, id",
+                        (rule[0], currency),
                     ).fetchall()
                     batch = batches[0] if batches else None
                     if batch is None:
+                        already_handled = connection.execute(
+                            "SELECT 1 FROM accounting_task_batches WHERE rule_id = ? "
+                            "AND currency = ? AND membership_fingerprint = ? AND status "
+                            "NOT IN ('open', 'in_progress') LIMIT 1",
+                            (rule[0], currency, membership_fingerprint),
+                        ).fetchone()
+                        if already_handled:
+                            continue
                         batch_id = uuid4().hex
+                        dedupe = f"{rule[0]}:{currency}:{batch_id}"
                         connection.execute(
                             """INSERT INTO accounting_task_batches(
                                 id, task_type, escalation_level, source_due_date, currency,
                                 evaluation_date, due_at, status, invoice_count_initial,
-                                invoice_count_open, outstanding_cents, created_automatically,
-                                rule_id, deduplication_key, created_at, updated_at
-                            ) VALUES(?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, 1, ?, ?, ?, ?)""",
+                                invoice_count_open, outstanding_cents, estimated_minutes,
+                                created_automatically,
+                                rule_id, deduplication_key, membership_fingerprint,
+                                created_at, updated_at
+                            ) VALUES(?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)""",
                             (
                                 batch_id,
                                 rule[1],
@@ -1409,8 +1485,10 @@ class StructuralOfficeDatabase:
                                 len(members),
                                 len(members),
                                 sum(item[3] for item in members),
+                                estimated_minutes,
                                 rule[0],
                                 dedupe,
+                                membership_fingerprint,
                                 timestamp,
                                 timestamp,
                             ),
@@ -1421,14 +1499,15 @@ class StructuralOfficeDatabase:
                         batch_id = batch[0]
                         connection.execute(
                             "UPDATE accounting_task_batches SET source_due_date = ?, "
-                            "evaluation_date = ?, invoice_count_initial = MAX(invoice_count_initial, ?), "
-                            "deduplication_key = ?, updated_at = ?, revision = revision + 1 "
+                            "evaluation_date = ?, invoice_count_initial = "
+                            "MAX(invoice_count_initial, ?), "
+                            "membership_fingerprint = ?, updated_at = ?, revision = revision + 1 "
                             "WHERE id = ?",
                             (
                                 source_due_date,
                                 evaluation_date,
                                 len(members),
-                                dedupe,
+                                membership_fingerprint,
                                 timestamp,
                                 batch_id,
                             ),
@@ -1571,7 +1650,8 @@ class StructuralOfficeDatabase:
         )
         batch = connection.execute(
             "SELECT task_type, escalation_level, source_due_date, due_at, status, "
-            "invoice_count_initial, invoice_count_open, outstanding_cents, currency "
+            "invoice_count_initial, invoice_count_open, outstanding_cents, currency, "
+            "estimated_minutes "
             "FROM accounting_task_batches WHERE id = ?",
             (batch_id,),
         ).fetchone()
@@ -1590,7 +1670,7 @@ class StructuralOfficeDatabase:
         invoice_range = (
             first_invoice_number
             if first_invoice_number == last_invoice_number
-            else f"{first_invoice_number}–{last_invoice_number}"
+            else f"{first_invoice_number}-{last_invoice_number}"
             if first_invoice_number and last_invoice_number
             else ""
         )
@@ -1602,6 +1682,7 @@ class StructuralOfficeDatabase:
                 "description": (
                     f"{batch[6]} overdue open invoice(s) in range {invoice_range}."
                 ),
+                "estimated_minutes": batch[9],
                 "escalation_level": batch[1],
                 "first_invoice_number": first_invoice_number,
                 "invoice_count_initial": batch[5],
@@ -1611,7 +1692,7 @@ class StructuralOfficeDatabase:
                 "outstanding_cents": batch[7],
                 "source_due_date": batch[2],
                 "task_type": batch[0],
-                "topic_name": f"Overdue invoices {invoice_range}",
+                "topic_name": f"Write payment reminders {invoice_range}",
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -1619,8 +1700,8 @@ class StructuralOfficeDatabase:
         connection.execute(
             """INSERT INTO task_occurrences(
                 id, source_type, source_id, scheduled_date, due_at, status, priority,
-                topic_snapshot, created_at, updated_at
-            ) VALUES(?, 'accounting_due_batch', ?, ?, ?, ?, 'high', ?, ?, ?)
+                topic_snapshot, estimated_minutes, created_at, updated_at
+            ) VALUES(?, 'accounting_due_batch', ?, ?, ?, ?, 'high', ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET due_at=excluded.due_at,
                 status=excluded.status, topic_snapshot=excluded.topic_snapshot,
                 updated_at=excluded.updated_at, revision=task_occurrences.revision + 1""",
@@ -1631,6 +1712,7 @@ class StructuralOfficeDatabase:
                 batch[3],
                 batch[4],
                 snapshot,
+                batch[9],
                 timestamp,
                 timestamp,
             ),
@@ -1652,7 +1734,8 @@ class StructuralOfficeDatabase:
             rows = connection.execute(
                 "SELECT id, task_type, escalation_level, source_due_date, currency, "
                 "evaluation_date, due_at, status, invoice_count_initial, "
-                "invoice_count_open, outstanding_cents, created_automatically, "
+                "invoice_count_open, outstanding_cents, estimated_minutes, "
+                "created_automatically, "
                 "rule_id, created_at, updated_at, completed_at, revision "
                 f"FROM accounting_task_batches {where} ORDER BY due_at DESC LIMIT ? OFFSET ?",
                 (*params, limit, offset),
@@ -1660,7 +1743,8 @@ class StructuralOfficeDatabase:
         keys = (
             "id", "task_type", "escalation_level", "source_due_date", "currency",
             "evaluation_date", "due_at", "status", "invoice_count_initial",
-            "invoice_count_open", "outstanding_cents", "created_automatically",
+            "invoice_count_open", "outstanding_cents", "estimated_minutes",
+            "created_automatically",
             "rule_id", "created_at", "updated_at", "completed_at", "revision",
         )
         return {
@@ -1721,7 +1805,8 @@ class StructuralOfficeDatabase:
             rows = connection.execute(
                 "SELECT id, routine_id, topic_id, source_type, source_id, scheduled_date, "
                 "due_at, status, priority, topic_snapshot, started_at, completed_at, "
-                "completed_by, completion_note, revision, created_at, updated_at "
+                "completed_by, completion_note, estimated_minutes, revision, created_at, "
+                "updated_at "
                 f"FROM task_occurrences WHERE {where} "
                 "ORDER BY due_at, id LIMIT ? OFFSET ?",
                 (*params, limit, offset),
@@ -1730,7 +1815,7 @@ class StructuralOfficeDatabase:
             "id", "routine_id", "topic_id", "source_type", "source_id",
             "scheduled_date", "due_at", "status", "priority", "snapshot",
             "started_at", "completed_at", "completed_by", "completion_note",
-            "revision", "created_at", "updated_at",
+            "estimated_minutes", "revision", "created_at", "updated_at",
         )
         items = [dict(zip(keys, row, strict=True)) for row in rows]
         for item in items:
@@ -1743,7 +1828,8 @@ class StructuralOfficeDatabase:
             row = connection.execute(
                 "SELECT id, routine_id, topic_id, source_type, source_id, scheduled_date, "
                 "due_at, status, priority, topic_snapshot, started_at, completed_at, "
-                "completed_by, completion_note, revision, created_at, updated_at, archived_at "
+                "completed_by, completion_note, estimated_minutes, revision, created_at, "
+                "updated_at, archived_at "
                 "FROM task_occurrences WHERE id = ?",
                 (task_id,),
             ).fetchone()
@@ -1753,7 +1839,7 @@ class StructuralOfficeDatabase:
                 "id", "routine_id", "topic_id", "source_type", "source_id",
                 "scheduled_date", "due_at", "status", "priority", "snapshot",
                 "started_at", "completed_at", "completed_by", "completion_note",
-                "revision", "created_at", "updated_at", "archived_at",
+                "estimated_minutes", "revision", "created_at", "updated_at", "archived_at",
             )
             task = dict(zip(keys, row, strict=True))
             task["snapshot"] = json.loads(task["snapshot"])
@@ -1775,6 +1861,45 @@ class StructuralOfficeDatabase:
             item["required"] = bool(item["required"])
         return task
 
+    def today_dashboard(self, today: str) -> dict[str, Any]:
+        """Return today's open workload and the longest due task."""
+        try:
+            date.fromisoformat(today)
+        except ValueError as err:
+            raise StructuralOfficeValidationError("Dashboard date must use YYYY-MM-DD") from err
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, source_type, due_at, status, priority, topic_snapshot, "
+                "estimated_minutes FROM task_occurrences WHERE archived_at IS NULL "
+                "AND status IN ('open', 'in_progress') AND scheduled_date <= ? "
+                "ORDER BY estimated_minutes DESC, due_at, "
+                "CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 "
+                "WHEN 'normal' THEN 2 ELSE 3 END, id",
+                (today,),
+            ).fetchall()
+        tasks = []
+        for row in rows:
+            snapshot = json.loads(row[5])
+            tasks.append(
+                {
+                    "due_at": row[2],
+                    "estimated_minutes": row[6],
+                    "id": row[0],
+                    "priority": row[4],
+                    "source_type": row[1],
+                    "status": row[3],
+                    "title": snapshot.get("topic_name", ""),
+                }
+            )
+        return {
+            "date": today,
+            "estimated_minutes_total": sum(
+                item["estimated_minutes"] for item in tasks
+            ),
+            "longest_task": tasks[0] if tasks else None,
+            "open_task_count": len(tasks),
+        }
+
     def create_manual_task(
         self, raw: dict[str, Any], timestamp: str, user_id: str, user_name: str
     ) -> dict[str, Any]:
@@ -1790,6 +1915,13 @@ class StructuralOfficeDatabase:
         priority = str(raw.get("priority", "normal"))
         if priority not in {"low", "normal", "high", "critical"}:
             raise StructuralOfficeValidationError("Invalid task priority")
+        if "estimated_minutes" not in raw:
+            raise StructuralOfficeValidationError("Task estimated_minutes is required")
+        estimated_minutes = int(raw["estimated_minutes"])
+        if not 1 <= estimated_minutes <= 1440:
+            raise StructuralOfficeValidationError(
+                "Estimated minutes must be between 1 and 1440"
+            )
         checklist = raw.get("checklist", [])
         if not isinstance(checklist, list) or len(checklist) > 100:
             raise StructuralOfficeValidationError("Task checklist is invalid")
@@ -1800,6 +1932,7 @@ class StructuralOfficeDatabase:
             {
                 "category": str(raw.get("category") or ""),
                 "description": str(raw.get("description") or ""),
+                "estimated_minutes": estimated_minutes,
                 "topic_name": title,
             },
             ensure_ascii=False,
@@ -1810,9 +1943,12 @@ class StructuralOfficeDatabase:
             try:
                 connection.execute(
                     "INSERT INTO task_occurrences(id, source_type, scheduled_date, due_at, "
-                    "status, priority, topic_snapshot, created_at, updated_at) "
-                    "VALUES(?, 'manual', ?, ?, 'open', ?, ?, ?, ?)",
-                    (task_id, scheduled_date, due_at, priority, snapshot, timestamp, timestamp),
+                    "status, priority, topic_snapshot, estimated_minutes, created_at, "
+                    "updated_at) VALUES(?, 'manual', ?, ?, 'open', ?, ?, ?, ?, ?)",
+                    (
+                        task_id, scheduled_date, due_at, priority, snapshot,
+                        estimated_minutes, timestamp, timestamp,
+                    ),
                 )
             except sqlite3.IntegrityError as err:
                 raise StructuralOfficeValidationError("Task ID already exists") from err
@@ -1831,7 +1967,9 @@ class StructuralOfficeDatabase:
                 )
             self._record_change(
                 connection, "tasks", task_id, "created", 1, user_id, user_name,
-                ["checklist", "due_at", "priority", "title"], raw, timestamp,
+                ["checklist", "due_at", "estimated_minutes", "priority", "title"],
+                raw,
+                timestamp,
             )
         return self.get_materialized_task(task_id)
 
@@ -1844,7 +1982,7 @@ class StructuralOfficeDatabase:
         user_name: str,
     ) -> dict[str, Any]:
         """Update task state and scheduling with optimistic concurrency control."""
-        allowed = {"completion_note", "due_at", "priority", "status"}
+        allowed = {"completion_note", "due_at", "estimated_minutes", "priority", "status"}
         if not changes or (unknown := set(changes) - allowed):
             detail = f": {', '.join(sorted(unknown))}" if changes and unknown else ""
             raise StructuralOfficeValidationError(f"Unsupported or empty task update{detail}")
@@ -1859,6 +1997,12 @@ class StructuralOfficeDatabase:
                 raise StructuralOfficeValidationError("Invalid task priority")
         if "completion_note" in normalized:
             normalized["completion_note"] = str(normalized["completion_note"])[:5000]
+        if "estimated_minutes" in normalized:
+            normalized["estimated_minutes"] = int(normalized["estimated_minutes"])
+            if not 1 <= normalized["estimated_minutes"] <= 1440:
+                raise StructuralOfficeValidationError(
+                    "Estimated minutes must be between 1 and 1440"
+                )
         if "due_at" in normalized:
             try:
                 datetime.fromisoformat(str(normalized["due_at"]))

@@ -5,6 +5,29 @@ All notable changes to StructuralOffice are documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.9.0-beta] - 2026-08-17
+
+### Added
+
+- Database schema version 5 as the frozen StructuralOffice 1.0 task model.
+- Direct routines that materialize recurring tasks without a separate topic record.
+- Estimated minutes on routines, materialized tasks, and standalone tasks.
+- Configurable estimated duration for grouped payment-reminder tasks, defaulting to ten
+  minutes per invoice-number range.
+- Authenticated `/api/structuraloffice/v1/dashboard/today` summary with today's total
+  estimated office workload and longest due task.
+- Membership fingerprints preventing completed invoice-range tasks from being recreated
+  for an unchanged set of overdue invoices.
+
+### Changed
+
+- Grouped overdue-invoice tasks are titled as payment-reminder writing tasks.
+- Task estimates are snapshotted when routine and invoice tasks are materialized.
+- Task updates may revise the estimated duration with optimistic concurrency protection.
+- Automatic dunning-stage rules are disabled; CSV imports create only the grouped
+  payment-reminder writing task required by the 1.0 task-list scope.
+- The frontend cache and integration version are now `0.9.0-beta`.
+
 ## [0.7.1-alpha] - 2026-08-17
 
 ### Changed
@@ -230,7 +253,8 @@ All notable changes to StructuralOffice are documented in this file. The format 
 - Push notifications to selected `notify` entities
 - Task states, sensors, calendar support, and local storage
 
-[Unreleased]: https://github.com/jl0906/StructuralOffice/compare/v0.7.1-alpha...HEAD
+[Unreleased]: https://github.com/jl0906/StructuralOffice/compare/v0.9.0-beta...HEAD
+[0.9.0-beta]: https://github.com/jl0906/StructuralOffice/compare/v0.7.1-alpha...v0.9.0-beta
 [0.7.1-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.7.0-alpha...v0.7.1-alpha
 [0.7.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.6.0-alpha...v0.7.0-alpha
 [0.6.0-alpha]: https://github.com/jl0906/StructuralOffice/compare/v0.5.0-alpha...v0.6.0-alpha

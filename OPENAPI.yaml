@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: StructuralOffice API
-  version: 0.7.1-alpha
+  version: 0.9.0-beta
   description: Backend API for the separately developed StructuralOffice Windows client.
 servers:
   - url: /api/structuraloffice/v1
@@ -11,6 +11,12 @@ paths:
   /status:
     get:
       summary: Return backend and database health
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /dashboard/today:
+    get:
+      summary: Return today's open office workload and longest due task
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"
@@ -127,7 +133,7 @@ paths:
         "200":
           $ref: "#/components/responses/JsonSuccess"
     patch:
-      summary: Update task status, priority, due time, or completion note
+      summary: Update task status, priority, due time, estimate, or completion note
       requestBody:
         $ref: "#/components/requestBodies/RevisionedPatch"
       responses:

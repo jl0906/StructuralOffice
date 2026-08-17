@@ -10,6 +10,7 @@
           "default_payment_term_days": "Default payment term (days)",
           "default_reminder_time": "Default reminder time",
           "notify_targets": "Notification devices",
+          "payment_reminder_estimated_minutes": "Estimated minutes per payment-reminder task",
           "sepa_date_as_due_date": "Use SEPA debit date as due date",
           "company_name": "Company name",
           "company_address": "Company address",
@@ -19,6 +20,7 @@
           "catch_up_hours": "How long a reminder missed during downtime may still be sent.",
           "default_payment_term_days": "Used for imported invoices that do not provide a due date.",
           "notify_targets": "One or more notify entities, for example your phone.",
+          "payment_reminder_estimated_minutes": "Duration assigned to each new grouped invoice-range task.",
           "sepa_date_as_due_date": "When enabled, a populated SEPA debit date overrides the calculated payment term."
         },
         "description": "Set up StructuralOffice and choose the devices for push notifications.",
@@ -34,6 +36,7 @@
           "default_payment_term_days": "Default payment term (days)",
           "default_reminder_time": "Default reminder time",
           "notify_targets": "Notification devices",
+          "payment_reminder_estimated_minutes": "Estimated minutes per payment-reminder task",
           "sepa_date_as_due_date": "Use SEPA debit date as due date",
           "company_name": "Company name",
           "company_address": "Company address",
@@ -43,6 +46,7 @@
           "catch_up_hours": "Set to 0 to disable catch-up.",
           "default_payment_term_days": "New CSV imports use this value; existing due dates remain unchanged.",
           "notify_targets": "These targets receive StructuralOffice reminders.",
+          "payment_reminder_estimated_minutes": "New tasks use this value; existing tasks keep their estimate.",
           "sepa_date_as_due_date": "When enabled, a populated SEPA debit date overrides the calculated payment term."
         },
         "title": "StructuralOffice settings"

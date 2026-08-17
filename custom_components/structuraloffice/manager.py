@@ -31,6 +31,7 @@ from .const import (
     CONF_DEFAULT_PAYMENT_TERM_DAYS,
     CONF_DEFAULT_REMINDER_TIME,
     CONF_NOTIFY_TARGETS,
+    CONF_PAYMENT_REMINDER_ESTIMATED_MINUTES,
     CONF_SEPA_DATE_AS_DUE_DATE,
     DATABASE_DIRECTORY,
     DATABASE_FILENAME,
@@ -38,6 +39,7 @@ from .const import (
     DEFAULT_COMPANY_ADDRESS,
     DEFAULT_COMPANY_EMAIL,
     DEFAULT_COMPANY_NAME,
+    DEFAULT_PAYMENT_REMINDER_ESTIMATED_MINUTES,
     DEFAULT_PAYMENT_TERM_DAYS,
     DEFAULT_REMINDER_TIME,
     DEFAULT_SEPA_DATE_AS_DUE_DATE,
@@ -200,6 +202,12 @@ class StructuralOfficeManager:
             ),
             CONF_COMPANY_EMAIL: str(
                 self.entry.options.get(CONF_COMPANY_EMAIL, DEFAULT_COMPANY_EMAIL)
+            ),
+            CONF_PAYMENT_REMINDER_ESTIMATED_MINUTES: int(
+                self.entry.options.get(
+                    CONF_PAYMENT_REMINDER_ESTIMATED_MINUTES,
+                    DEFAULT_PAYMENT_REMINDER_ESTIMATED_MINUTES,
+                )
             ),
         }
 
@@ -501,6 +509,13 @@ class StructuralOfficeManager:
         """Return one task with its checklist."""
         return await self.hass.async_add_executor_job(
             self.database.get_materialized_task, task_id
+        )
+
+    async def async_today_dashboard(self) -> dict[str, Any]:
+        """Return the local day's task workload summary."""
+        today = dt_util.now().date().isoformat()
+        return await self.hass.async_add_executor_job(
+            self.database.today_dashboard, today
         )
 
     async def async_create_manual_task(
@@ -845,6 +860,7 @@ class StructuralOfficeManager:
             dt_util.utcnow().isoformat(),
             local_now.strftime("%H:%M"),
             force,
+            self.options[CONF_PAYMENT_REMINDER_ESTIMATED_MINUTES],
         )
         if result["created"] or result["updated"] or result["completed"]:
             self.hass.bus.async_fire(
@@ -903,7 +919,7 @@ class StructuralOfficeManager:
         return {
             "backups": list(self.backups),
             "database": dict(self.database_stats),
-            "version": "0.7.1-alpha",
+            "version": "0.9.0-beta",
         }
 
     async def async_set_occurrence_status(self, item_id: str, status: str) -> dict[str, Any]:
@@ -927,7 +943,9 @@ class StructuralOfficeManager:
         except (ValueError, TypeError):
             return False
         routine = self.data["routines"].get(routine_id)
-        if routine is None or topic_id not in routine["topic_ids"]:
+        if routine is None or (
+            topic_id != "direct" and topic_id not in routine["topic_ids"]
+        ):
             return False
         return due in set(iter_due_dates(routine, due, due))
 
@@ -939,10 +957,22 @@ class StructuralOfficeManager:
             if not routine["enabled"]:
                 continue
             for due in iter_due_dates(routine, start, end):
-                for topic_id in routine["topic_ids"]:
-                    topic = topics.get(topic_id)
-                    if topic is None:
-                        continue
+                topic_ids = routine["topic_ids"] or ["direct"]
+                for topic_id in topic_ids:
+                    if topic_id == "direct":
+                        topic = {
+                            "name": routine["name"],
+                            "description": routine["description"],
+                            "category": "Routine",
+                            "checklist": [],
+                            "steps": [],
+                            "priority": routine.get("priority", "normal"),
+                            "estimated_minutes": routine.get("estimated_minutes", 10),
+                        }
+                    else:
+                        topic = topics.get(topic_id)
+                        if topic is None:
+                            continue
                     item_id = occurrence_id(routine["id"], topic_id, due)
                     stored = self.data["occurrences"].get(item_id, {})
                     result.append(
@@ -950,13 +980,19 @@ class StructuralOfficeManager:
                             "id": item_id,
                             "routine_id": routine["id"],
                             "routine_name": routine["name"],
-                            "topic_id": topic_id,
+                            "topic_id": None if topic_id == "direct" else topic_id,
                             "topic_name": topic["name"],
                             "description": topic["description"],
                             "category": topic["category"],
                             "checklist": topic["checklist"],
                             "steps": topic.get("steps", []),
                             "priority": topic.get("priority", "normal"),
+                            "estimated_minutes": int(
+                                topic.get(
+                                    "estimated_minutes",
+                                    routine.get("estimated_minutes", 10),
+                                )
+                            ),
                             "due_date": due.isoformat(),
                             "due_time": routine["due_time"],
                             "status": stored.get("status", STATUS_OPEN),
@@ -1034,14 +1070,18 @@ class StructuralOfficeManager:
             end = routine_now.date() - timedelta(days=min(offsets) - 1)
             due_clock = time.fromisoformat(routine["due_time"])
             for due in iter_due_dates(routine, start, end):
-                for topic_id in routine["topic_ids"]:
+                for topic_id in routine["topic_ids"] or ["direct"]:
                     item_id = occurrence_id(routine["id"], topic_id, due)
                     item_status = (
                         self.data["occurrences"].get(item_id, {}).get("status", STATUS_OPEN)
                     )
                     if item_status != STATUS_OPEN:
                         continue
-                    topic = self.data["topics"].get(topic_id)
+                    topic = (
+                        {"name": routine["name"]}
+                        if topic_id == "direct"
+                        else self.data["topics"].get(topic_id)
+                    )
                     if topic is None:
                         continue
                     eligible: list[tuple[int, datetime, str]] = []

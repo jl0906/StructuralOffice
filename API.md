@@ -1,7 +1,7 @@
 # StructuralOffice API
 
 This document describes the alpha API contract implemented by StructuralOffice
-`0.7.1-alpha`. The contract may change before `1.0.0`. A machine-readable contract is
+`0.9.0-beta`. The contract may change before `1.0.0`. A machine-readable contract is
 available in [OPENAPI.yaml](OPENAPI.yaml).
 
 ## Connection and authorization
@@ -175,6 +175,42 @@ Row fingerprints also detect bookings already seen in a different export.
 
 ## Materialized workflow tasks
 
+Today's total estimated office workload and the longest open due task are available at:
+
+```http
+GET /api/structuraloffice/v1/dashboard/today
+```
+
+The total includes open and in-progress tasks due today or earlier. Future, completed,
+skipped, and cancelled tasks are excluded.
+
+Routines can create tasks directly without a topic. Create them through the revisioned
+`routines` live collection, for example:
+
+```http
+POST /api/structuraloffice/v1/live/routines
+
+{
+  "data": {
+    "name": "Report employee vacation days to the tax adviser",
+    "description": "",
+    "estimated_minutes": 15,
+    "priority": "normal",
+    "due_time": "09:00",
+    "timezone": "Europe/Berlin",
+    "enabled": true,
+    "topic_ids": [],
+    "reminder_offsets": [],
+    "schedule": {
+      "frequency": "monthly",
+      "interval": 1,
+      "start_date": "2026-08-01",
+      "month_days": [8]
+    }
+  }
+}
+```
+
 List persisted routine and accounting tasks:
 
 ```http
@@ -197,6 +233,7 @@ POST /api/structuraloffice/v1/tasks
   "title": "Prepare quarterly report",
   "due_at": "2026-10-01T09:00:00+02:00",
   "priority": "high",
+  "estimated_minutes": 45,
   "checklist": ["Collect figures", "Review report"]
 }
 ```
@@ -213,7 +250,8 @@ PATCH /api/structuraloffice/v1/tasks/<task-id>
 }
 ```
 
-Mutable task fields are `status`, `priority`, `due_at`, and `completion_note`. Checklist
+Mutable task fields are `status`, `priority`, `due_at`, `estimated_minutes`, and
+`completion_note`. Checklist
 items are independently revisioned:
 
 ```http

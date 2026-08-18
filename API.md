@@ -1,7 +1,7 @@
 # StructuralOffice API
 
-This document describes the beta API contract implemented by StructuralOffice
-`1.0.0-rc1`. The feature set and versioned API are frozen for final validation. A machine-readable contract is
+This document describes the stable API contract implemented by StructuralOffice
+`1.0.0`. A machine-readable contract is
 available in [OPENAPI.yaml](OPENAPI.yaml).
 
 ## Connection and authorization
@@ -15,7 +15,7 @@ Content-Type: application/json
 ```
 
 Home Assistant authentication is followed by a StructuralOffice role check. Viewers may
-read records and events. Editors may also change business records and edit presence.
+read records and events. Editors may also change business records.
 Administrators additionally manage roles, backups, and audit access.
 
 Every successful request is routed by the authenticated Home Assistant user ID to that
@@ -100,30 +100,6 @@ DELETE /api/structuraloffice/v1/live/contacts/9ab123?expected_revision=4
 Business records are archived, not physically deleted. A topic cannot be archived while
 an active routine references it.
 
-## Edit presence
-
-Start a session when an editor opens a record:
-
-```http
-POST /api/structuraloffice/v1/editing/invoices/csv_123
-
-{
-  "client_id": "office-desktop-1",
-  "ttl_seconds": 60
-}
-```
-
-The response includes `session_id`, `expires_at`, and all current `editors`. Refresh the
-session by repeating the request with its `session_id`. End it with:
-
-```http
-DELETE /api/structuraloffice/v1/editing/invoices/csv_123?session_id=<session-id>
-```
-
-Sessions last between 15 and 300 seconds and do not grant an exclusive lock.
-Presence collections additionally include `tasks`, `task_checklist`, and
-`accounting_rules`.
-
 ## Live events and reconnect recovery
 
 Subscribe through the Home Assistant WebSocket connection:
@@ -136,8 +112,7 @@ Subscribe through the Home Assistant WebSocket connection:
 ```
 
 Each event provides `collection`, `record_id`, `operation`, `revision`, `sequence`, and
-`changed_fields`. Presence events additionally provide `editors`. Events do not contain
-record payloads.
+`changed_fields`. Events do not contain record payloads.
 
 Persist the latest sequence on the Windows client. After reconnecting, retrieve missed
 events before restarting the subscription:

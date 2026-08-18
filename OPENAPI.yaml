@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: StructuralOffice API
-  version: 1.0.0-rc1
+  version: 1.0.0
   description: >-
     Backend API for the separately developed StructuralOffice Windows client. Every
     operation is scoped to the authenticated Home Assistant user's private database.
@@ -76,37 +76,6 @@ paths:
           $ref: "#/components/responses/JsonSuccess"
         "409":
           $ref: "#/components/responses/Conflict"
-  /editing/{collection}/{record_id}:
-    parameters:
-      - name: collection
-        in: path
-        required: true
-        schema:
-          type: string
-      - $ref: "#/components/parameters/RecordId"
-    get:
-      summary: List active editors
-      responses:
-        "200":
-          $ref: "#/components/responses/JsonSuccess"
-    post:
-      summary: Start or refresh an edit-presence session
-      requestBody:
-        $ref: "#/components/requestBodies/JsonBody"
-      responses:
-        "200":
-          $ref: "#/components/responses/JsonSuccess"
-    delete:
-      summary: End an edit-presence session
-      parameters:
-        - name: session_id
-          in: query
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          $ref: "#/components/responses/JsonSuccess"
   /tasks:
     get:
       summary: List materialized routine, accounting, and manual tasks

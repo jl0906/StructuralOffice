@@ -23,7 +23,6 @@ VALID_COLLECTIONS = {
     "routines",
     "topics",
 }
-VALID_EDIT_COLLECTIONS = VALID_COLLECTIONS | {"accounting_rules", "task_checklist", "tasks"}
 
 
 class StructuralOfficeConflictError(StructuralOfficeValidationError):
@@ -128,18 +127,6 @@ class StructuralOfficeDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS change_events_created_idx
                     ON change_events (created_at);
-                CREATE TABLE IF NOT EXISTS edit_sessions (
-                    session_id TEXT PRIMARY KEY,
-                    collection TEXT NOT NULL,
-                    record_id TEXT NOT NULL,
-                    client_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    user_name TEXT NOT NULL,
-                    acquired_at TEXT NOT NULL,
-                    expires_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS edit_sessions_record_idx
-                    ON edit_sessions (collection, record_id);
                 CREATE TABLE IF NOT EXISTS audit_log (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                     action TEXT NOT NULL,
@@ -1072,95 +1059,6 @@ class StructuralOfficeDatabase:
             "total": total,
         }
 
-    def start_edit_session(
-        self,
-        collection: str,
-        record_id: str,
-        client_id: str,
-        user_id: str,
-        user_name: str,
-        ttl_seconds: int = 60,
-        session_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Create or refresh a soft edit-presence session."""
-        if collection not in VALID_EDIT_COLLECTIONS:
-            raise StructuralOfficeValidationError("Unknown edit collection")
-        ttl_seconds = max(15, min(300, ttl_seconds))
-        now = datetime.now(UTC)
-        expires_at = now + timedelta(seconds=ttl_seconds)
-        with self._connect() as connection:
-            connection.execute(
-                "DELETE FROM edit_sessions WHERE expires_at <= ?", (now.isoformat(),)
-            )
-            if session_id:
-                existing = connection.execute(
-                    "SELECT user_id, collection, record_id FROM edit_sessions "
-                    "WHERE session_id = ?",
-                    (session_id,),
-                ).fetchone()
-                if existing is None or existing != (user_id, collection, record_id):
-                    raise StructuralOfficeValidationError("Edit session was not found")
-                connection.execute(
-                    "UPDATE edit_sessions SET expires_at = ?, client_id = ? "
-                    "WHERE session_id = ?",
-                    (expires_at.isoformat(), client_id, session_id),
-                )
-            else:
-                session_id = uuid4().hex
-                connection.execute(
-                    "INSERT INTO edit_sessions(session_id, collection, record_id, "
-                    "client_id, user_id, user_name, acquired_at, expires_at) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        session_id,
-                        collection,
-                        record_id,
-                        client_id[:200],
-                        user_id,
-                        user_name[:200],
-                        now.isoformat(),
-                        expires_at.isoformat(),
-                    ),
-                )
-        return {
-            "editors": self.active_edit_sessions(collection, record_id),
-            "expires_at": expires_at.isoformat(),
-            "session_id": session_id,
-        }
-
-    def active_edit_sessions(self, collection: str, record_id: str) -> list[dict[str, Any]]:
-        """Return current editors for one record."""
-        self._validate_collection(collection)
-        now = datetime.now(UTC).isoformat()
-        with self._connect() as connection:
-            connection.execute("DELETE FROM edit_sessions WHERE expires_at <= ?", (now,))
-            rows = connection.execute(
-                "SELECT session_id, client_id, user_id, user_name, acquired_at, expires_at "
-                "FROM edit_sessions WHERE collection = ? AND record_id = ? "
-                "ORDER BY acquired_at",
-                (collection, record_id),
-            ).fetchall()
-        return [
-            {
-                "acquired_at": row[4],
-                "client_id": row[1],
-                "expires_at": row[5],
-                "session_id": row[0],
-                "user_id": row[2],
-                "user_name": row[3],
-            }
-            for row in rows
-        ]
-
-    def end_edit_session(self, session_id: str, user_id: str) -> bool:
-        """End one edit session owned by the requesting user."""
-        with self._connect() as connection:
-            cursor = connection.execute(
-                "DELETE FROM edit_sessions WHERE session_id = ? AND user_id = ?",
-                (session_id, user_id),
-            )
-        return cursor.rowcount > 0
-
     def add_import_batch(
         self,
         batch: dict[str, Any],
@@ -1735,9 +1633,11 @@ class StructuralOfficeDatabase:
                 "source_due_date": batch[2],
                 "task_type": batch[0],
                 "topic_name": (
-                    f"Process dunning notices · {batch[6]} invoices · {batch[8]}"
+                    f"Process dunning notices · {batch[6]} invoices · "
+                    f"{invoice_range} · {batch[8]}"
                     if batch[0] == "dunning"
-                    else f"Process payment reminders · {batch[6]} invoices · {batch[8]}"
+                    else f"Process payment reminders · {batch[6]} invoices · "
+                    f"{invoice_range} · {batch[8]}"
                 ),
             },
             ensure_ascii=False,

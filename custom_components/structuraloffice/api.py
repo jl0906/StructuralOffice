@@ -206,60 +206,6 @@ class StructuralOfficeLiveRecordView(HomeAssistantView):
             return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
 
 
-class StructuralOfficeEditingView(HomeAssistantView):
-    """Manage expiring edit-presence sessions."""
-
-    url = f"{API_PREFIX}/editing/{{collection}}/{{record_id}}"
-    name = f"api:{DOMAIN}:v1:editing"
-
-    async def get(
-        self, request: web.Request, collection: str, record_id: str
-    ) -> web.Response:
-        _role(request)
-        try:
-            editors = await _manager(request).hass.async_add_executor_job(
-                _manager(request).database.active_edit_sessions, collection, record_id
-            )
-            return self.json({"editors": editors})
-        except StructuralOfficeValidationError as err:
-            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
-
-    async def post(
-        self, request: web.Request, collection: str, record_id: str
-    ) -> web.Response:
-        _role(request, write=True)
-        try:
-            payload = await request.json()
-            user_id, user_name = _identity(request)
-            result = await _manager(request).async_start_edit_session(
-                collection,
-                record_id,
-                str(payload.get("client_id") or "windows-client"),
-                user_id,
-                user_name,
-                int(payload.get("ttl_seconds", 60)),
-                payload.get("session_id"),
-            )
-            return self.json(result)
-        except (StructuralOfficeValidationError, TypeError, ValueError) as err:
-            return self.json({"code": "invalid_request", "error": str(err)}, status_code=400)
-
-    async def delete(
-        self, request: web.Request, collection: str, record_id: str
-    ) -> web.Response:
-        _role(request, write=True)
-        session_id = str(request.query.get("session_id") or "")
-        if not session_id:
-            return self.json(
-                {"code": "invalid_request", "error": "session_id is required"},
-                status_code=400,
-            )
-        ended = await _manager(request).async_end_edit_session(
-            collection, record_id, session_id, request["hass_user"].id
-        )
-        return self.json({"ended": ended})
-
-
 class StructuralOfficeEventsView(HomeAssistantView):
     """Return missed live events after a reconnect cursor."""
 
@@ -836,7 +782,6 @@ def async_register(hass: HomeAssistant) -> None:
         StructuralOfficeInvoicesView,
         StructuralOfficeLiveCollectionView,
         StructuralOfficeLiveRecordView,
-        StructuralOfficeEditingView,
         StructuralOfficeEventsView,
         StructuralOfficeAuditView,
         StructuralOfficeRolesView,

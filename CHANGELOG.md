@@ -5,6 +5,27 @@ All notable changes to StructuralOffice are documented in this file. The format 
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-18
+
+### Added
+
+- Direct task completion from both the Today dashboard and the annual task list.
+- Regression coverage proving that several independent routines can be created and
+  persisted in one private user database.
+
+### Changed
+
+- Accounting package titles show both the open invoice count and the first-to-last
+  invoice-number range.
+- Routine creation now keeps an explicit frontend creation state so live refreshes and
+  automatic list selection cannot turn a new routine into an edit of an existing one.
+- Promoted the backend and API contract from `1.0.0-rc1` to stable `1.0.0`.
+
+### Removed
+
+- Advisory edit-presence sessions and their REST endpoint. Revision checks, transactional
+  merges, and HTTP 409 conflict protection remain in place for data integrity.
+
 ## [1.0.0-rc1] - 2026-08-17
 
 ### Added
@@ -327,7 +348,8 @@ All notable changes to StructuralOffice are documented in this file. The format 
 - Push notifications to selected `notify` entities
 - Task states, sensors, calendar support, and local storage
 
-[Unreleased]: https://github.com/jl0906/StructuralOffice/compare/v1.0.0-rc1...HEAD
+[Unreleased]: https://github.com/jl0906/StructuralOffice/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/jl0906/StructuralOffice/compare/v1.0.0-rc1...v1.0.0
 [1.0.0-rc1]: https://github.com/jl0906/StructuralOffice/compare/v0.9.2-beta...v1.0.0-rc1
 [0.9.2-beta]: https://github.com/jl0906/StructuralOffice/compare/v0.9.1-beta...v0.9.2-beta
 [0.9.1-beta]: https://github.com/jl0906/StructuralOffice/compare/v0.9.0-beta...v0.9.1-beta

@@ -426,59 +426,6 @@ class StructuralOfficeManager:
         self.hass.bus.async_fire(LIVE_UPDATE_EVENT, self._tenant_payload(event))
         self._notify_changed()
 
-    async def async_start_edit_session(
-        self,
-        collection: str,
-        record_id: str,
-        client_id: str,
-        user_id: str,
-        user_name: str,
-        ttl_seconds: int,
-        session_id: str | None,
-    ) -> dict[str, Any]:
-        """Start or refresh a soft edit-presence session."""
-        result = await self.hass.async_add_executor_job(
-            self.database.start_edit_session,
-            collection,
-            record_id,
-            client_id,
-            user_id,
-            user_name,
-            ttl_seconds,
-            session_id,
-        )
-        self.hass.bus.async_fire(
-            LIVE_UPDATE_EVENT,
-            self._tenant_payload({
-                "collection": collection,
-                "editors": result["editors"],
-                "operation": "presence",
-                "record_id": record_id,
-            }),
-        )
-        return result
-
-    async def async_end_edit_session(
-        self, collection: str, record_id: str, session_id: str, user_id: str
-    ) -> bool:
-        """End an edit-presence session."""
-        ended = await self.hass.async_add_executor_job(
-            self.database.end_edit_session, session_id, user_id
-        )
-        editors = await self.hass.async_add_executor_job(
-            self.database.active_edit_sessions, collection, record_id
-        )
-        self.hass.bus.async_fire(
-            LIVE_UPDATE_EVENT,
-            self._tenant_payload({
-                "collection": collection,
-                "editors": editors,
-                "operation": "presence",
-                "record_id": record_id,
-            }),
-        )
-        return ended
-
     async def async_events_since(self, after: int, limit: int) -> dict[str, Any]:
         """Return persisted changes for reconnecting clients."""
         return await self.hass.async_add_executor_job(

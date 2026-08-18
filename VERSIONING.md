@@ -5,10 +5,10 @@ prereleases while the integration and Windows application are under development.
 
 ## Current status
 
-`1.0.0-rc1`
+`1.0.0`
 
-This release candidate freezes the planned 1.0 feature set and API. It is intended for
-final migration, upgrade, and real-world validation before the stable release.
+This is the first stable StructuralOffice release. The versioned API and database
+migration path are supported for production upgrades.
 
 ## Release stages
 

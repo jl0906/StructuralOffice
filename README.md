@@ -5,15 +5,15 @@ invoice due-date monitoring. The operational desktop interface is being moved to
 separate Windows application. Home Assistant now provides database health statistics
 and managed backup controls only.
 
-## Version 1.0.0-rc1
+## Version 1.0.0
 
-This release adds private per-user storage while retaining the main backend task
-lifecycle and the contract needed by the Windows client:
+This stable release provides private per-user storage and the complete backend task
+lifecycle required by the Windows client:
 
 - A dedicated, versioned SQLite database for every authorized Home Assistant user under
   `/config/structuraloffice/users/<opaque-user-id>/structuraloffice.db`
 - Complete isolation of contacts, topics, routines, tasks, invoices, import history,
-  audit entries, edit presence, generated workflows, and backups between users
+  audit entries, generated workflows, and backups between users
 - Central administrator/editor/viewer role assignment using existing Home Assistant users
 - Lossless upgrade of the former shared database into the Home Assistant owner's private
   database while retaining the original source for rollback
@@ -36,8 +36,7 @@ lifecycle and the contract needed by the Windows client:
 - Field-level updates with optimistic concurrency control
 - Automatic merging when concurrent clients changed different fields
 - `409 Conflict` responses when clients changed the same field
-- Expiring edit-presence sessions showing who currently has a record open
-- Authorized WebSocket subscriptions for immediate record and presence events
+- Authorized WebSocket subscriptions for immediate record events
 - Persistent event cursors for catching up after a lost connection
 - Audit metadata for every live create, update, merge, and archive operation
 - REST role administration for the future Windows client
@@ -48,7 +47,7 @@ lifecycle and the contract needed by the Windows client:
 - A rolling task-materialization window that preserves task history independently of
   later topic changes
 - Configurable grouped payment-reminder task generation for overdue invoices
-- Exactly one automatic follow-up task per rule, invoice due date, and currency, linked
+- Exactly one active automatic follow-up package per workflow stage and currency, linked
   to the precise set of unpaid invoices
 - Automatic completion of grouped accounting tasks after all linked invoices are paid,
   cancelled, archived, or otherwise no longer open
@@ -58,7 +57,6 @@ lifecycle and the contract needed by the Windows client:
   only after an explicit request
 - Standalone task creation plus revision-protected task and checklist updates
 - Completion timestamps, completing-user attribution, and task/checklist notes
-- Advisory edit presence for tasks, checklist items, and accounting rules
 - Configurable non-working dates and per-routine IANA timezone validation
 - Effective `configured_window`, `latest_only`, and `skip_missed` reminder catch-up
   strategies
@@ -139,7 +137,7 @@ The API uses Home Assistant authentication. Clients send a valid Home Assistant 
 token in the `Authorization` header. Authorization is additionally limited by the
 StructuralOffice administrator, editor, and viewer roles.
 
-The complete request, revision, presence, conflict, and reconnect contract is documented
+The complete request, revision, conflict, and reconnect contract is documented
 in [API.md](API.md) and [OPENAPI.yaml](OPENAPI.yaml).
 
 | Method | Endpoint | Purpose |
@@ -160,7 +158,6 @@ in [API.md](API.md) and [OPENAPI.yaml](OPENAPI.yaml).
 | `PATCH` | `/api/structuraloffice/v1/accounting/rules/{id}` | Revision-protected rule update |
 | `GET/POST` | `/api/structuraloffice/v1/live/{collection}` | Page or create live records |
 | `GET/PATCH/DELETE` | `/api/structuraloffice/v1/live/{collection}/{id}` | Read, update, or archive a revisioned record |
-| `GET/POST/DELETE` | `/api/structuraloffice/v1/editing/{collection}/{id}` | Read, start, refresh, or end edit presence |
 | `GET` | `/api/structuraloffice/v1/events` | Retrieve missed events after a sequence cursor |
 | `GET` | `/api/structuraloffice/v1/audit` | Administrator-only audit metadata |
 | `GET/PUT` | `/api/structuraloffice/v1/roles` | Administrator-only role management |
@@ -201,11 +198,12 @@ template is edited.
 
 Accounting rules are evaluated on the server. Each enabled stage defines the number of
 days after the invoice due date, evaluation time, minimum open count, notification
-choice, and automatic completion behavior. Matching receivables are grouped by original
-due date and currency. For example, if 40 invoices share a due date and ten remain open,
-the server creates one task linked to those ten invoice IDs, not ten separate tasks.
+choice, and automatic completion behavior. Matching receivables are consolidated into
+one active package per workflow stage and currency. The package title shows both the
+open invoice count and the first-to-last invoice-number range; exact membership remains
+linked internally.
 
-## Live editing contract
+## Live update contract
 
 Every live record is returned in an envelope containing `id`, `collection`, `data`,
 `revision`, `created_at`, `updated_at`, and `archived_at`. Updates send only the changed
@@ -219,11 +217,6 @@ Clients subscribe with the Home Assistant WebSocket command
 revision, sequence, and changed field names, but no business payload. After reconnecting,
 the client requests `/api/structuraloffice/v1/events?after=<sequence>` before resuming its
 live subscription.
-
-Edit presence is advisory rather than an exclusive lock. A client starts a session when
-a record is opened, refreshes it before expiry, and ends it when the editor closes. This
-allows other users to see concurrent editors while revision checks remain the final data
-integrity mechanism.
 
 ## Backup and privacy
 

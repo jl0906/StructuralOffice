@@ -68,7 +68,7 @@ async def ws_get_data(hass, connection, msg) -> None:
 @websocket_api.async_response
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/subscribe_live"})
 async def ws_subscribe_live(hass, connection, msg) -> None:
-    """Subscribe an authorized Windows client to live record and presence events."""
+    """Subscribe an authorized Windows client to live record events."""
     try:
         _manager(hass, connection.user.id)
         _require_role(hass, connection, READ_ROLES)
